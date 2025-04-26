@@ -1,0 +1,12 @@
+# Cache files
+__pycache__/
+*.pyc
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.coverage*
+
+# Build and distribution files
+dist/
+build/
+*.egg-info/
