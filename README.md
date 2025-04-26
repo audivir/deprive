@@ -27,7 +27,7 @@ These following features don't raise any warning or errors, but the correctness 
 
 # Changelog
 
-## 0.1.0 - Initial Release
+## 0.1.2 - Initial Release
 - Initial implementation of the deprive library.
 - Support for parsing Python files and generating dependency graphs.
 - Codes needs to be cleaned up and refactored.

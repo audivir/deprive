@@ -14,7 +14,7 @@ from deprive.modifier import modify_package
 from deprive.tracker import track_dependencies
 from deprive.visitor import Definition, DepGraph, Import
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 __all__ = [
     "Definition",
     "DepGraph",

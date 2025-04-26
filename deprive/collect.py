@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from typing_extensions import TypeAlias
 
 from deprive.names import path_to_fqn
-from deprive.visitor import DepGraph
-from deprive.visitor import ScopeVisitor as _Visitor
+from deprive.visitor import DepGraph, ScopeVisitor
 
 if TYPE_CHECKING:
     from collections.abc import Collection
     from os import PathLike
-
-logger = logging.getLogger(__name__)
 
 StrPath: TypeAlias = "str | PathLike[str]"
 
@@ -52,7 +48,7 @@ def collect_module(
         root_dir = Path(root_dir)
 
     fqn = path_to_fqn(file_path, root_dir)
-    visitor = _Visitor(fqn)
+    visitor = ScopeVisitor(fqn)
     visitor.run(file_path.read_text())
     additional = set(additional or [])
     for elem in additional:
