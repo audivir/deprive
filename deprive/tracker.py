@@ -5,23 +5,32 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from deprive.visitor import Definition, DepGraph
+from deprive.visitor import Definition, DepGraph, Import
 
 if TYPE_CHECKING:
     from collections.abc import Collection
 
+
 logger = logging.getLogger(__name__)
 
 
-def _recursively_track(
+def _recursively_track(  # noqa: C901,PLR0912
     root_name: str, input_graph: DepGraph, output_graph: DepGraph, elem: Definition
 ) -> None:
     if elem in output_graph:
         return
     calls = input_graph.get(elem, None)
     if calls is None:
-        raise ValueError(f"Required element {elem} not found in the module")
+        module_def = Definition(elem.module, None)
+        subdefs = input_graph.get(module_def, None)
+        if subdefs is None:
+            raise ValueError(f"Neither element nor module {elem} found in the graph")
+        calls = {x for x in subdefs if isinstance(x, Import) and x.asname == elem.name}
+        if len(calls) != 1:
+            raise ValueError(f"Should be exactly one import matching {elem}: {calls}")
 
+    if elem in output_graph:
+        raise ValueError(f"Element {elem} already tracked")
     output_graph[elem] = calls
 
     # add parents
@@ -42,9 +51,8 @@ def _recursively_track(
                 new_def = Definition(name, None)
             else:
                 name = call.name[0]
-                new_def = Definition(
-                    name, call.name[1]
-                )  # TODO(tihoph): unsafe if call.name[1] is a module
+                # TODO(tihoph): unsafe if call.name[1] is a module
+                new_def = Definition(name, call.name[1])
             if name == root_name or name.startswith(f"{root_name}."):
                 _recursively_track(root_name, input_graph, output_graph, new_def)
             else:

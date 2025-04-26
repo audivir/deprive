@@ -1,7 +1,5 @@
 """Main module for the sample project."""
 
-# Non-existent import - should be ignored if not used
-# from .nonexistent import NonExistent
 # Standard library import
 from __future__ import annotations
 

@@ -69,7 +69,9 @@ def _unpack_target(node: ast.expr) -> list[str]:
     return names
 
 
-def get_node_defined_names(node: ast.AST, strict: bool = True) -> tuple[str, ...] | str | None:  # noqa: PLR0911
+def get_node_defined_names(  # noqa: C901,PLR0911
+    node: ast.AST, strict: bool = True
+) -> tuple[str, ...] | str | None:
     """Safely get the name(s) defined by an AST node.
 
     Args:
@@ -93,6 +95,8 @@ def get_node_defined_names(node: ast.AST, strict: bool = True) -> tuple[str, ...
         return tuple(names)
     if isinstance(node, ast.AnnAssign):
         # Handle MY_CONST: int = ... (target can only be Name, Attribute, Subscript)
+        if isinstance(node.target, ast.Attribute):
+            return None
         if isinstance(node.target, ast.Name):
             return node.target.id
         raise TypeError(  # pragma: no cover
@@ -118,7 +122,11 @@ def get_attribute_parts(node: ast.Attribute) -> list[str]:
     while isinstance(value, ast.Attribute):
         parts.append(value.attr)
         value = value.value
+
+    # e. g (test / test).test, test().test, test[0].test, 'test'.test
     if not isinstance(value, ast.Name):  # pragma: no cover
-        raise TypeError("Unexpected value type for attribute chain")
+        if not isinstance(value, (ast.BinOp, ast.Call, ast.Subscript, ast.Constant)):
+            logger.warning("Not a Name node in attribute chain: %s", type(value).__name__)
+        return []
     parts.append(value.id)
     return list(reversed(parts))

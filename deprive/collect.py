@@ -21,6 +21,13 @@ logger = logging.getLogger(__name__)
 StrPath: TypeAlias = "str | PathLike[str]"
 
 
+def _split_fqn(fqn: str) -> tuple[str, str | None]:
+    """Splits a fully qualified name into its module and element parts."""
+    if "." in fqn:
+        return tuple(fqn.rsplit(".", maxsplit=1))  # type: ignore[return-value]
+    return fqn, None
+
+
 def collect_module(
     file_path: StrPath, root_dir: StrPath | None = None, additional: Collection[str] | None = None
 ) -> DepGraph:
@@ -53,16 +60,22 @@ def collect_module(
     return visitor.dep_graph
 
 
-def collect_package(root_dir: StrPath) -> DepGraph:
+def collect_package(root_dir: StrPath, additional: Collection[str] | None = None) -> DepGraph:
     """Parses a Python package and returns a dictionary of dependencies."""
     # TODO(tihoph): add support for subpackages by providing a name
     root_dir = Path(root_dir)
     dep_graphs: list[DepGraph] = []
+    split_additional: set[tuple[str, str | None]] = {_split_fqn(fqn) for fqn in additional or []}
+
     for path in root_dir.rglob("*.py"):
         fqn = path_to_fqn(path, root_dir)
-        visitor = _Visitor(fqn)
-        visitor.run(path.read_text())
-        dep_graphs.append(visitor.dep_graph)
+        curr_additional: list[str] = []
+        for parent, child in split_additional:
+            add_fqn = f"{parent}.{child}"
+            if fqn in (add_fqn, parent):
+                curr_additional.append(add_fqn)
+        dep_graph = collect_module(path, root_dir, additional=curr_additional)
+        dep_graphs.append(dep_graph)
     dep_graph_all: DepGraph = {}
     for dep_graph in dep_graphs:
         if set(dep_graph) & set(dep_graph_all):  # pragma: no cover

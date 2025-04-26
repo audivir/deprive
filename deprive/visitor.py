@@ -186,6 +186,46 @@ class ScopeVisitor(ast.NodeVisitor):
 
         self.generic_visit(node)
 
+    def _handle_all(self, node: ast.Assign | ast.AnnAssign | ast.AugAssign) -> None:
+        if node.value is None:
+            raise ValueError("No value for __all__ assignment.")
+        code = ast.unparse(node.value)
+        contents = ast.literal_eval(code)
+        # verify we a re in a module scope
+        if len(self.tracker.scopes) != 1:
+            raise ValueError("__all__ must be defined at the module level.")
+        # TODO(tihoph): handle all
+        logger.debug("Handling __all__: %s", contents)
+
+    @override
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        """Handle augmented assignment to __all__."""
+        if isinstance(node.target, ast.Name) and node.target.id == "__all__":
+            self._handle_all(node)
+            raise NotImplementedError("Augmented assignment to __all__ is not supported yet.")
+        self.generic_visit(node)
+
+    @override
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        """Handle __all__ seperately from other assignments."""
+        # TODO(tihoph): __all__, other = [...], ... is currently not handled correctly.
+        if isinstance(node.target, ast.Name) and node.target.id == "__all__":
+            self._handle_all(node)
+
+        self.generic_visit(node)
+
+    @override
+    def visit_Assign(self, node: ast.Assign) -> None:
+        """Handle __all__ seperately from other assignments."""
+        if (
+            len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "__all__"
+        ):
+            self._handle_all(node)
+
+        self.generic_visit(node)
+
     @override
     def visit_Attribute(self, node: ast.Attribute) -> None:
         """Visits an attribute access node."""
@@ -195,10 +235,11 @@ class ScopeVisitor(ast.NodeVisitor):
             return
 
         parts = get_attribute_parts(node)
-        for ix in range(1, len(parts)):
-            fqn = ".".join(parts[:ix])
-            if self._visit_load(fqn, node, strict=False):
-                break
+        if parts:
+            for ix in range(1, len(parts)):
+                fqn = ".".join(parts[:ix])
+                if self._visit_load(fqn, node, strict=False):
+                    break
 
         self.generic_visit(node)
 
@@ -255,8 +296,8 @@ class ScopeVisitor(ast.NodeVisitor):
         for ix, decorator in enumerate(node.decorator_list):
             if self.debug:  # pragma: no cover
                 self._visited_nodes.append(f"decorator{ix}")
-            if not isinstance(decorator, ast.Name):  # pragma: no cover
-                raise TypeError(f"Decorator {decorator} is not a Name")
+            if not isinstance(decorator, (ast.Name, ast.Call)):  # pragma: no cover
+                raise TypeError(f"Decorator {decorator} is not a Name or Call")
             self.visit(decorator)
 
     @override
@@ -335,7 +376,7 @@ class ScopeVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         """Visit calls. If the name is a deferred function, visit its body."""
         # TODO(tihoph): if the name is assigned a new name, we can't resolve it
-        if isinstance(node.func, ast.Attribute):
+        if isinstance(node.func, (ast.Attribute, ast.Call)):
             self.generic_visit(node)
             return
 

@@ -52,15 +52,17 @@ def _modify_module(
     for call in calls:
         if isinstance(call, Import):
             required_imports.add(call.asname)
-        elif call.name:
+        elif call.module == module_def.module and call.name:
             keep_definitions.add(call.name)
 
     new_code = handle_module(code, required_imports, keep_definitions)
+    if not new_code and rel_path.name != "__init__.py":
+        return
     # create the new directory
     parent = output / rel_path.parent
     parent.mkdir(parents=True, exist_ok=True)
     # write the modified code to the temporary directory
-    (parent / rel_path.name).write_text(new_code)
+    (parent / rel_path.name).write_text(new_code or "")
 
 
 def modify_package(root_dir: StrPath, required: Collection[str], output: StrPath) -> None:
@@ -71,7 +73,7 @@ def modify_package(root_dir: StrPath, required: Collection[str], output: StrPath
     if not output.is_dir():
         raise ValueError(f"Output {output} must be a directory")
 
-    graph = collect_package(root_dir)
+    graph = collect_package(root_dir, required)
     tracked = track_dependencies(root_name, graph, required)
 
     # select only the modules

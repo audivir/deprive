@@ -63,7 +63,7 @@ def test_path_to_fqn_outside_root() -> None:
         ("def _internal(): pass", "_internal"),  # Names starting with _ are included
         ("def __dunder__(): pass", "__dunder__"),
         # TypeAlias example (if supported in the future)
-        # ("MyType = list[int]", ("MyType",)),
+        # ("MyType = list[int]", ("MyType",)), # noqa: ERA001
         # Complex target assignments
         ("x.y = 1", None),  # Attribute target is ignored
         ("a[0] = 1", None),  # Subscript target is ignored

@@ -27,7 +27,7 @@ class Scope:
     functions: dict[str | int, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda] = field(
         default_factory=dict
     )
-    names: dict[str, ast.AST] = field(default_factory=dict)
+    names: dict[str, ast.AST | None] = field(default_factory=dict)
 
     @property
     def fields(
@@ -36,7 +36,7 @@ class Scope:
         dict[str, str],
         dict[str, tuple[str, str]],
         dict[str | int, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda],
-        dict[str, ast.AST],
+        dict[str, ast.AST | None],
     ]:
         """Fields of the scope."""
         return (self.imports, self.imports_from, self.functions, self.names)
