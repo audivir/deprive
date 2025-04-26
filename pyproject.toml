@@ -24,9 +24,6 @@ Repository = "https://github.com/audivir/deprive"
 [project.optional-dependencies]
 dev = ["ruff", "mypy", "pytest", "coverage[toml]", "vulture"]
 
-[project.scripts]
-deprive = "deprive:main"
-
 [tool.setuptools]
 dynamic = { version = { attr = "deprive.__version__" } }
 
