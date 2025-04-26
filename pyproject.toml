@@ -13,6 +13,7 @@ authors = [{ name = "Tim Hörmann", email = "pypi@audivir.de" }]
 description = "Generate dependency graphs and modify Python packages based on the generated graphs."
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 keywords = []
 classifiers = []
 
