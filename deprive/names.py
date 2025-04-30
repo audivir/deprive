@@ -84,6 +84,8 @@ def get_node_defined_names(  # noqa: C901,PLR0911
     names: list[str] = []
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return node.name
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        return tuple(node.names)
     if isinstance(node, ast.Assign):
         # Handle assignments like MY_CONST = ..., x, y = ...
         for target in node.targets:
@@ -93,14 +95,14 @@ def get_node_defined_names(  # noqa: C901,PLR0911
         if len(names) == 1:
             return names[0]
         return tuple(names)
-    if isinstance(node, ast.AnnAssign):
+    if isinstance(node, (ast.AnnAssign, ast.AugAssign)):
         # Handle MY_CONST: int = ... (target can only be Name, Attribute, Subscript)
-        if isinstance(node.target, ast.Attribute):
+        if isinstance(node.target, (ast.Attribute, ast.Subscript)):
             return None
         if isinstance(node.target, ast.Name):
             return node.target.id
         raise TypeError(  # pragma: no cover
-            f"Invalid AnnAssign target type: {type(node.target).__name__} (expected Name)"
+            f"Invalid AnnAssign/AugAssign target type: {type(node.target).__name__} (expected Name)"
         )
     if hasattr(node, "custom_name") and isinstance(node.custom_name, str):
         # Handle custom name attributes (e.g., in AST transformations)

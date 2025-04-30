@@ -7,11 +7,13 @@ from typing import TYPE_CHECKING, TypeVar
 
 import libcst as cst
 from libcst._nodes.base import CSTNode
+from libcst._nodes.expression import List, Name, SimpleString
 from libcst._nodes.module import Module
 from libcst._nodes.op import ImportStar
 from libcst._nodes.statement import (
     AnnAssign,
     Assign,
+    AugAssign,
     BaseCompoundStatement,
     BaseSmallStatement,
     BaseStatement,
@@ -72,7 +74,7 @@ def get_node(
 def _get_alias(import_alias: ImportAlias) -> str:
     """Get the alias of an import."""
     name = import_alias.asname.name.value if import_alias.asname else import_alias.name.value  # type: ignore[union-attr]
-    if not isinstance(name, str):
+    if not isinstance(name, str):  # pragma: no cover
         raise TypeError(f"Expected str for alias, got {type(name)}")
     return name
 
@@ -81,28 +83,26 @@ def handle_import(
     elem: AllTypes, import_elem: Import | ImportFrom, required: set[str]
 ) -> list[AllTypes]:
     """Handle an import statement. Return the nodes that should be kept."""
-    if isinstance(import_elem, Import):
-        if len(import_elem.names) != 1:
-            raise NotImplementedError(
-                "Multiple imports in a single import statement are not supported."
-            )
-        if _get_alias(import_elem.names[0]) in required | {"__future__"}:
-            return [elem]
-        return []
-
-    # keep only imports where the alias is in required
     if isinstance(import_elem.names, ImportStar):
         raise NotImplementedError("Import * is not supported.")
 
-    if import_elem.module is None:
-        raise ValueError("ImportFrom without a module is not supported.")
-
-    if import_elem.module.value == "__future__":
+    if (
+        isinstance(import_elem, ImportFrom)
+        and import_elem.module
+        and import_elem.module.value == "__future__"
+    ):
         return [elem]
 
-    kept_names = [alias for alias in import_elem.names if _get_alias(alias) in required]
+    kept_names = [
+        alias
+        for alias in import_elem.names
+        if _get_alias(alias) in required | {"__future__"} or alias.name.value == "__future__"
+    ]
     if not kept_names:
         return []
+
+    if len(kept_names) == len(import_elem.names):  # no changes
+        return [elem]
 
     # Remove trailing comma
     kept_names[-1] = kept_names[-1].with_changes(comma=cst.MaybeSentinel.DEFAULT)
@@ -111,11 +111,68 @@ def handle_import(
     return [new_elem]
 
 
+def _filter_all(
+    node: AllTypes,
+    elem: BaseCompoundStatement | Assign | AnnAssign | AugAssign,
+    required: set[str],
+    keep: set[str],
+) -> list[AllTypes] | None:
+    if isinstance(elem, BaseCompoundStatement):
+        # not an assignment
+        return None
+    if isinstance(elem, Assign) and len(elem.targets) == 1:
+        # multiple targets
+        single_target = elem.targets[0].target
+    elif isinstance(elem, AnnAssign):
+        single_target = elem.target
+    else:
+        return None
+    if not isinstance(single_target, Name) or single_target.value != "__all__":
+        # assignment not named __all__ or assignment to subscript, attribute, etc.
+        return None
+
+    if elem.value is None:
+        raise ValueError("No value for __all__ assignment.")
+
+    if not isinstance(elem.value, List) or not all(
+        isinstance(child.value, SimpleString) for child in elem.value.elements
+    ):
+        raise TypeError(f"Expected a list of literal strings, got {elem.value}")
+
+    kept_elements = [
+        child
+        for child in elem.value.elements
+        if ast.literal_eval(child.value.value) in keep | required  # type: ignore[attr-defined]
+    ]
+
+    if not kept_elements:  # no elements to keep remove __all__ assignment
+        return []
+
+    if len(kept_elements) == len(elem.value.elements):  # no changes
+        return [node]
+
+    kept_elements[-1] = kept_elements[-1].with_changes(comma=cst.MaybeSentinel.DEFAULT)
+    new_list = elem.value.with_changes(elements=kept_elements)
+    new_node: AllTypes = node.deep_replace(elem.value, new_list)  # type: ignore[arg-type]
+    return [new_node]
+
+
 def handle_elem(
-    node: AllTypes, elem: BaseCompoundStatement | Assign | AnnAssign, keep: set[str]
+    node: AllTypes,
+    elem: BaseCompoundStatement | Assign | AnnAssign | AugAssign,
+    required: set[str],
+    keep: set[str],
 ) -> list[AllTypes]:
     """Handle an a definition. Return the nodes that should be kept."""
+    all_elem = _filter_all(node, elem, required, keep)
+    if all_elem is not None:
+        return all_elem
+
     names = get_names(elem)
+
+    if "__all__" in names:
+        raise ValueError("Unsupported __all__ definition.")
+
     if any(name in keep for name in names):
         return [node]
     return []
@@ -142,14 +199,18 @@ def _handle_body_elem(
     if isinstance(elem, (If, Else)):
         output.extend(_handle_if_else(elem, required, keep))
     elif isinstance(elem, BaseCompoundStatement):
-        output.extend(handle_elem(elem, elem, keep))
+        output.extend(handle_elem(elem, elem, required, keep))
     elif import_elem := get_node(elem, Import) or get_node(elem, ImportFrom):
         output.extend(handle_import(elem, import_elem, required))
-    elif assign_elem := get_node(elem, Assign) or get_node(elem, AnnAssign):
-        output.extend(handle_elem(elem, assign_elem, keep))
+    elif (
+        assign_elem := get_node(elem, Assign)
+        or get_node(elem, AnnAssign)
+        or get_node(elem, AugAssign)
+    ):
+        output.extend(handle_elem(elem, assign_elem, required, keep))
     elif get_node(elem, Expr):  # Add this condition to check for expressions
         output.append(elem)  # Add the expression to the output
-    else:
+    else:  # pragma: no cover
         raise ValueError(f"Unexpected element: {elem}")
 
 

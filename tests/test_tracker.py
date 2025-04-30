@@ -4,11 +4,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from deprive.collect import collect_package
 from deprive.tracker import track_dependencies
 from deprive.visitor import Definition, Import
 
 PROJ_PATH = Path(__file__).parent / "_assets" / "simple_proj"
+
+
+def test_track_dependencies_fails() -> None:
+    graph = collect_package(PROJ_PATH)
+    with pytest.raises(ValueError, match="No matching definition found for"):
+        track_dependencies("simple_proj", graph, ["simple_proj.unknown"])
+
+    with pytest.raises(ValueError, match="No matching definition or module found for"):
+        track_dependencies("simple_proj", graph, ["simple_proj.unknown.func"])
+
+    with pytest.raises(ValueError, match="Required element must start with the module name"):
+        track_dependencies("simple_proj", graph, ["other_proj"])
 
 
 def test_track_dependencies() -> None:

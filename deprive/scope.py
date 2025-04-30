@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import ast
 import logging
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+if sys.version_info >= (3, 12):  # pragma: no cover
+    from typing import TypeAlias
+else:
+    from typing_extensions import TypeAlias
 
 from deprive.names import get_node_defined_names
 
@@ -14,6 +20,8 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
 logger = logging.getLogger(__name__)
+
+FuncType: TypeAlias = "ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda"
 
 
 @dataclass
@@ -24,10 +32,10 @@ class Scope:
     imports_from: dict[str, tuple[str, str]] = field(
         default_factory=dict
     )  # name -> source_item_fqn (e.g., {'os_path': 'os.path'})
-    functions: dict[str | int, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda] = field(
-        default_factory=dict
-    )
+    functions: dict[str | int, FuncType] = field(default_factory=dict)
     names: dict[str, ast.AST | None] = field(default_factory=dict)
+    global_names: set[str] = field(default_factory=set)
+    nonlocal_names: set[str] = field(default_factory=set)
 
     @property
     def fields(
@@ -35,7 +43,7 @@ class Scope:
     ) -> tuple[
         dict[str, str],
         dict[str, tuple[str, str]],
-        dict[str | int, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda],
+        dict[str | int, FuncType],
         dict[str, ast.AST | None],
     ]:
         """Fields of the scope."""
@@ -47,19 +55,23 @@ class ScopeTracker:
 
     def __init__(self) -> None:
         """Initialize the function tracker."""
-        self.scopes: list[Scope] = [Scope()]
+        self.scopes: list[Scope] = [Scope()]  # initialize the global scope
         self.visited_funcs: list[int] = []  # list of ids of visited function nodes
         self.all_nodes: dict[int, ast.AST] = {}  # all nodes by object id
         self.all_scopes: dict[int, Scope] = {}  # all scopes by object id
 
     def is_in(self, name: str, inner_only: bool = False) -> bool:
-        """Check if a name is in the current scope and if it's the outermost scope."""
+        """Check if a name is any scope or only the inner ones."""
         scopes = self.scopes[1:] if inner_only else self.scopes
         for scope in reversed(scopes):
             for elem in scope.fields:
                 if name in elem:
                     return True
         return False
+
+    def is_local(self, name: str) -> bool:
+        """Check if a name is locally defined and not with a global keyword."""
+        return name not in self.current_scope.global_names and self.is_in(name, inner_only=True)
 
     def is_import(self, name: str, outer_only: bool = False) -> tuple[str, str] | str | None:
         """Check if a name is an import."""
@@ -89,7 +101,7 @@ class ScopeTracker:
 
     @contextmanager
     def scope(self, node: ast.AST) -> Generator[None]:
-        """Context manager for a new scope."""
+        """Context manager for a new scope. Runs callback before closing scope."""
         self.push(node)
         try:
             yield
@@ -112,11 +124,9 @@ class ScopeTracker:
         """Pop the current scope off the stack."""
         self.scopes.pop()
 
-    def add_func(
-        self, name: str | int, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
-    ) -> None:
+    def add_func(self, name: str | int, node: FuncType) -> None:
         """Add a function to the current scope. Also adds to names."""
-        self.scopes[-1].functions[name] = node
+        self.current_scope.functions[name] = node
 
     def add_name(self, name: tuple[str, ...] | str | None, node: ast.AST) -> None:
         """Add a name to the current scope."""
@@ -127,61 +137,60 @@ class ScopeTracker:
         for n in name:
             if self.is_import(n):
                 raise NotImplementedError("Redefining imports is not supported yet.")
-            self.scopes[-1].names[n] = node
+            self.current_scope.names[n] = node
 
-    def resolve_func(self, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | None:
+    def resolve_func(self, name: str) -> FuncType | None:
         """Resolve a function name to its definition."""
         for scope in reversed(self.scopes):
             if name in scope.functions:
                 return scope.functions[name]
         return None
 
-    def is_visited(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> bool:
+    def is_visited(self, node: FuncType) -> bool:
         """Check if a function node has been visited."""
         return id(node) in self.visited_funcs
 
-    def mark_visited(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> None:
+    def mark_visited(self, node: FuncType) -> None:
         """Mark a function node as visited."""
         self.visited_funcs.append(id(node))
 
-    def add_import(self, node: ast.Import | ast.ImportFrom) -> None:
+    def add_import(self, node: ast.alias, module: str | None) -> None:
         """Add an import to the current scope."""
-        if isinstance(node, ast.Import):
-            self._handle_import(node)
-        else:
-            self._handle_import_from(node)
-
-    def _handle_import(self, node: ast.Import) -> None:
-        if len(node.names) != 1:
-            raise NotImplementedError(
-                "Multiple imports in a single statement are not supported yet."
-            )
-        alias = node.names[0]
-        module_name = alias.name
-        alias_name = alias.asname if alias.asname else module_name
+        alias_name = node.asname or node.name
         if self.is_import(alias_name):
             raise NotImplementedError("Redefining imports is not supported yet.")
-        self.scopes[-1].imports[alias_name] = module_name
-        logger.debug("Found import: import %s as %s", module_name, alias_name)
+        if module:
+            self.current_scope.imports_from[alias_name] = (module, node.name)
+            logger.debug("Found import: from %s import %s as %s", module, node.name, alias_name)
+        else:
+            self.current_scope.imports[alias_name] = node.name
+            logger.debug("Found import: import %s as %s", node.name, alias_name)
 
-    def _handle_import_from(self, node: ast.ImportFrom) -> None:
-        """Handle `from module import name [as alias]` imports."""
-        if node.level != 0:
-            raise NotImplementedError(
-                "Relative imports are not supported yet. Use absolute imports instead."
-            )
+    def add_global(self, node: ast.Global) -> None:
+        """Add global variables to tracker."""
+        if len(self.scopes) == 1:
+            raise ValueError("Global keyword in outer scope redundant")
+        if set(node.names) & self.current_scope.nonlocal_names:
+            raise ValueError("Global and nonlocal are mutually exclusive")
+        self.current_scope.global_names.update(node.names)
 
-        if len(node.names) == 1 and node.names[0].name == "*":
-            raise NotImplementedError(
-                "Star imports are not supported yet. Use explicit imports instead."
-            )
+    def add_nonlocal(self, node: ast.Nonlocal) -> None:
+        """Add nonlocal variables to tracker."""
+        if len(self.scopes) < 3:  # noqa: PLR2004
+            raise ValueError("Nonlocal keyword must be used in nested scope")
+        if set(node.names) & self.current_scope.global_names:
+            raise ValueError("Global and nonlocal are mutually exclusive")
+        self.current_scope.nonlocal_names.update(node.names)
 
-        # Handle imported names
-        for alias in node.names:
-            original_name = alias.name
-            alias_name = alias.asname if alias.asname else original_name
-            if self.is_import(alias_name):
-                raise NotImplementedError("Redefining imports is not supported yet.")
-            if not node.module:  # pragma: no cover
-                raise ValueError("Import from is missing module")
-            self.scopes[-1].imports_from[alias_name] = (node.module, original_name)
+    @property
+    def current_scope(self) -> Scope:
+        """Current scope."""
+        return self.scopes[-1]
+
+
+def add_parents(root: ast.AST) -> None:
+    """Add parent attribute to all nodes in the tree."""
+    for node in ast.walk(root):
+        for child in ast.iter_child_nodes(node):
+            if not hasattr(child, "parent"):
+                child.parent = node  # type: ignore[attr-defined]

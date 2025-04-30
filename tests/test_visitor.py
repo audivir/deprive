@@ -1,37 +1,68 @@
-"""Test deprive.visitor."""
+"""Test visit_* functions of visitor."""
 
 # ruff: noqa: N802,SLF001
 from __future__ import annotations
 
 import ast
 import logging
+import textwrap
+from collections import deque
+from typing import TYPE_CHECKING
 
 import pytest
 
-from deprive.scope import ScopeTracker
+from deprive.scope import ScopeTracker, add_parents
 from deprive.visitor import Definition, FunctionBodyWrapper, Import, ScopeVisitor, get_args
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 ModDef = Definition("test_module", None)
 FuncDef = Definition("test_module", "func")
+AllDef = Definition("test_module", "__all__")
 XDef = Definition("test_module", "x")
 OsImp = Import("os")
 
 
-def _make_name(name: str = "x") -> ast.Name:
-    """Create a name node."""
-    return ast.parse(name).body[0].value  # type: ignore[attr-defined,no-any-return]
-
-
-def _make_func(name: str = "func") -> ast.FunctionDef:
-    """Create a function node with the given name."""
-    return ast.parse(f"def {name}(): pass").body[0]  # type: ignore[return-value]
-
-
-def parse_and_visit(code: str, module_fqn: str = "test_module") -> ScopeVisitor:
+def parse_and_visit(code: str | Sequence[str], module_fqn: str = "test_module") -> ScopeVisitor:
     """Parses code and runs ScopeVisitor on it."""
     visitor = ScopeVisitor(module_fqn, debug=True)
-    visitor.run(code)
+    if not isinstance(code, str):
+        code = "\n".join(code)
+    visitor.run(textwrap.dedent(code))
     return visitor
+
+
+def visited_before(visitor: ScopeVisitor, before: type[ast.AST], after: type[ast.AST]) -> bool:
+    """Whether the class before was visited before the class after."""
+    before_ix = next(
+        iter(ix for ix, node in enumerate(visitor._visited_nodes) if isinstance(node, before))
+    )
+    after_ix = next(
+        iter(ix for ix, node in enumerate(visitor._visited_nodes) if isinstance(node, after))
+    )
+    return before_ix < after_ix
+
+
+def test_Import() -> None:
+    os_imp = Import("os")
+    assert os_imp.name == "os"
+    assert os_imp.asname == "os"
+    # comparable?
+    assert Import("os") == os_imp
+    assert Import("os") == Import("os", "os")
+    # hashable?
+    assert {os_imp} == {Import("os")}
+
+
+def test_Definition() -> None:
+    def_def = Definition("module", "name")
+    assert def_def.module == "module"
+    assert def_def.name == "name"
+    # comparable?
+    assert Definition("module", "name") == def_def
+    # hashable?
+    assert {def_def} == {Definition("module", "name")}
 
 
 @pytest.mark.parametrize(
@@ -63,40 +94,65 @@ def test_get_args(snippet: str, expected_args: set[str]) -> None:
     assert arg_names == expected_args
 
 
-def test_init() -> None:
+def test_ScopeVisitor_init() -> None:
     """Test ScopeVisitor initialization."""
     fqn = "my.module"
     visitor = ScopeVisitor(fqn)
     assert visitor.module_fqn == fqn
     assert isinstance(visitor.tracker, ScopeTracker)
     assert len(visitor.tracker.scopes) == 1  # Initial global scope
-    assert visitor.deferred == []
+    assert visitor.deferred == deque()
     assert visitor.parent is None
     assert visitor.dep_graph == {}
+    assert visitor._visited_nodes == []
+    assert visitor.all is None
 
 
-@pytest.mark.parametrize(
-    "code", ["global x", "def f():\n  global y", "def f():\n  x=1\n  def g():\n    nonlocal x"]
-)
-def test_visit_Global_Nonlocal_raises(code: str) -> None:
-    """Test that visit_Global and visit_Nonlocal raise NotImplementedError."""
-    tree = ast.parse(code)
-    visitor = ScopeVisitor("test_mod")
-    expected_error = NotImplementedError
-    match_msg = (
-        "Global statements are not supported"
-        if "global" in code
-        else "Nonlocal statements are not supported"
-    )
-    with pytest.raises(expected_error, match=match_msg):
-        visitor.visit(tree)
+def test_visit_Global_fail() -> None:
+    code = """\
+    global x
+    x = 1
+    """
+    with pytest.raises(ValueError, match="Global keyword in outer scope redundant"):
+        parse_and_visit(code)
+
+
+def test_visit_Global() -> None:
+    code = """\
+    x = 1
+    def func():
+        global x
+    """
+    visitor = parse_and_visit(code)
+    _, inner_scope = visitor.tracker.all_scopes.popitem()
+    inner_scope.global_names = {"x"}
+
+
+@pytest.mark.parametrize("code", ["nonlocal x", "def func():\n  nonlocal x"])
+def test_visit_Nonlocal_fail(code: str) -> None:
+    with pytest.raises(ValueError, match="Nonlocal keyword must be used in nested scope"):
+        parse_and_visit(code)
+
+
+def test_visit_Nonlocal() -> None:
+    code = """\
+    def func():
+        x = 1
+        def inner():
+            nonlocal x
+    """
+    visitor = parse_and_visit(code)
+    _, inner_scope = visitor.tracker.all_scopes.popitem()
+    inner_scope.nonlocal_names = {"x"}
 
 
 @pytest.mark.parametrize(
     ("code", "expected_imports", "expected_imports_from"),
     [
         ("import os", {"os": "os"}, {}),
+        ("import os, sys", {"os": "os", "sys": "sys"}, {}),
         ("import sys as system", {"system": "sys"}, {}),
+        ("import os, sys as system", {"os": "os", "system": "sys"}, {}),
         (
             "from collections import defaultdict",
             {},
@@ -109,7 +165,9 @@ def test_visit_Global_Nonlocal_raises(code: str) -> None:
     ],
     ids=[
         "simple_import",
+        "double_import",
         "import_as",
+        "double_import_as",
         "from_import",
         "from_import_as",
         "multi_import",
@@ -126,21 +184,38 @@ def test_visit_Import_ImportFrom(
     assert outer_scope.imports == expected_imports
     assert outer_scope.imports_from == expected_imports_from
 
-    # test that imports in scopes are only in this scope
+    # check the same for nested
     nested_code_lines = ["def func():"] + [f"  {line}" for line in code.splitlines()]
-    nested_code = "\n".join(nested_code_lines)
-    nested_visitor = parse_and_visit(nested_code)
+    nested_visitor = parse_and_visit(nested_code_lines)
     func_node = nested_visitor._visited_nodes[1]
+    # assert outer scope is empty
     nested_outer_scope = nested_visitor.tracker.scopes[0]
     assert nested_outer_scope.imports == {}
     assert nested_outer_scope.imports_from == {}
+    # assert inner scope is correct
     nested_inner_scope = nested_visitor.tracker.all_scopes[id(func_node)]
     assert nested_inner_scope.imports == expected_imports
     assert nested_inner_scope.imports_from == expected_imports_from
 
 
+def test_ImportFrom_star() -> None:
+    with pytest.raises(ValueError, match="Star imports are not supported."):
+        parse_and_visit("from test import *")
+
+
+def test_ImportFrom_relative() -> None:
+    with pytest.raises(ValueError, match="Relative import is deeper than module FQN."):
+        parse_and_visit("from . import foo", "test_module")
+
+    visitor = parse_and_visit("from . import foo\nfrom .other import bar", "pkg.test_module")
+    outer_scope = visitor.tracker.scopes[0]
+    assert outer_scope.imports_from == {"foo": ("pkg", "foo"), "bar": ("pkg.other", "bar")}
+
+
 @pytest.mark.parametrize(
-    ("code", "expected"), [("x = 1", {"x"}), ("del x", {"x"})], ids=["simple_name", "simple_del"]
+    ("code", "expected"),
+    [("x = 1", {"x"}), ("del x", {"x"}), ("x.a = 1", set())],
+    ids=["simple_name", "simple_del", "store_attr"],
 )
 def test_visit_Name_store_del(code: str, expected: set[str]) -> None:
     """Test that visiting imports updates the tracker correctly."""
@@ -149,13 +224,14 @@ def test_visit_Name_store_del(code: str, expected: set[str]) -> None:
     outer_scope = visitor.tracker.scopes[0]
     assert set(outer_scope.names) == expected
 
-    # test that imports in scopes are only in this scope
+    # check the same for nested
     nested_code_lines = ["def func():"] + [f"  {line}" for line in code.splitlines()]
-    nested_code = "\n".join(nested_code_lines)
-    nested_visitor = parse_and_visit(nested_code)
+    nested_visitor = parse_and_visit(nested_code_lines)
     func_node = nested_visitor._visited_nodes[1]
+    # assert outer scope is empty
     nested_outer_scope = nested_visitor.tracker.scopes[0]
-    assert set(nested_outer_scope.names) == set()  # outer scope should be empty
+    assert set(nested_outer_scope.names) == set()
+    # assert inner scope is correct
     nested_inner_scope = nested_visitor.tracker.all_scopes[id(func_node)]
     assert set(nested_inner_scope.names) == expected
 
@@ -166,21 +242,32 @@ def test_visit_Name_store_del(code: str, expected: set[str]) -> None:
         ("x = 1\nx", {"x"}, {ModDef: {XDef}, XDef: set()}, []),
         ("del x", {"x"}, {ModDef: set(), XDef: set()}, []),
         ("x", set(), {ModDef: set()}, ["x"]),
+        ("x.a = 1\nx.a", set(), {ModDef: set()}, []),
+        ("x.a.b = 1\nx.a.b", set(), {ModDef: set()}, []),
+        ("x.a", set(), {ModDef: set()}, ["x"]),
+        ("x.a.b", set(), {ModDef: set()}, ["x"]),
+        ("x = 1\nx.a", {"x"}, {ModDef: {XDef}, XDef: set()}, []),
+        ("x = 1\nx.a.b", {"x"}, {ModDef: {XDef}, XDef: set()}, []),
         ("import os\nos.path", set(), {ModDef: {OsImp}}, []),
         ("import os\nx = 1\nx\nos.path", {"x"}, {ModDef: {OsImp, XDef}, XDef: set()}, []),
-        # TODO(tihoph): Attribute access not implemented
         ("import importlib.util\nimportlib.spec", set(), {ModDef: set()}, []),
     ],
     ids=[
         "just_load",
         "just_del",
+        "attr_load",
+        "attr_load_deeper",
+        "unknown_attr",
+        "unknown_attr_deeper",
+        "attr_load_defined",
+        "attr_load_defined_deeper",
         "simple_unknown",
         "imported",
         "imported_and_load",
         "other_import",
     ],
 )
-def test_visit_Name_load(
+def test_visit_Name_Attribute_load(
     code: str,
     expected: set[str],
     dep_graph: dict[Definition, set[Definition | Import]],
@@ -208,7 +295,55 @@ def test_visit_Name_load(
     nested_inner_scope = nested_visitor.tracker.all_scopes[id(func_node)]
     assert set(nested_inner_scope.names) == expected
 
-    assert nested_visitor.dep_graph == {ModDef: set(), FuncDef: set()}
+    # if the import is kept
+    func_deps = {OsImp} if any(OsImp in v for v in dep_graph.values()) else set()
+    assert nested_visitor.dep_graph == {ModDef: set(), FuncDef: func_deps}
+
+
+def test_visit_Name_global() -> None:
+    code = """\
+    def func():
+        global x
+        x += 1
+    """
+    visitor = parse_and_visit(code)
+    outer_scope = visitor.tracker.scopes[0]
+    assert set(outer_scope.names) == {"x"}
+    assert visitor.dep_graph == {ModDef: set(), XDef: set(), FuncDef: {XDef}}
+
+
+def test_visit_Name_nonlocal() -> None:
+    code = """\
+    def func():
+        def inner():
+            nonlocal x
+            x = 1
+    """
+    visitor = parse_and_visit(code)
+    func_node = visitor._visited_nodes[1]
+    func_scope = visitor.tracker.all_scopes[id(func_node)]
+    assert set(func_scope.names) == {"x"}
+    assert set(func_scope.functions) == {"inner"}
+    assert visitor.dep_graph == {ModDef: set(), FuncDef: set()}
+
+
+def test_AugAssign() -> None:
+    visitor = parse_and_visit("""x = 1""")
+    assert visitor.dep_graph == {ModDef: set(), XDef: set()}
+
+    # is also loaded with aug assign
+    visitor = parse_and_visit("""x += 1""")
+    assert visitor.dep_graph == {ModDef: set(), XDef: {XDef}}
+    # TODO(tihoph): should raise error if x not in scope?
+
+    visitor = parse_and_visit("x = 1\nx += 1")
+    assert visitor.dep_graph == {ModDef: set(), XDef: {XDef}}
+
+    visitor = parse_and_visit("x = 1\nx.a += 1")
+    assert visitor.dep_graph == {ModDef: {XDef}, XDef: set()}
+
+    visitor = parse_and_visit("x = 1\nx.y.a += 1")
+    assert visitor.dep_graph == {ModDef: {XDef}, XDef: set()}
 
 
 @pytest.mark.parametrize(
@@ -346,46 +481,62 @@ def test_visit_Comprehension(code: str, cls: type[ast.AST], expected: list[str])
     # TODO(tihoph): test if names are added to scope
 
 
+def test_visit_Call(caplog: pytest.LogCaptureFixture) -> None:
+    """Test visiting calls handles scope and visits components correctly."""
+    code = """\
+    def func(a, b, c):
+       pass
+    x = 1
+    """
+    visitor = parse_and_visit(code)
+    # function bodies are deferred
+    assert visited_before(visitor, ast.Assign, ast.Pass)
+
+    code = """\
+    def func(a, b, c):
+       pass
+    func(1, 2, 3)
+    x: int = 1
+    """
+    visitor = parse_and_visit(code)
+    # function bodies are visited on calls
+    assert visited_before(visitor, ast.Pass, ast.AnnAssign)
+
+    with caplog.at_level(logging.DEBUG):
+        visitor = parse_and_visit("""print("Test")""")
+    assert "Name print is a built-in, skipping visit" in caplog.text
+
+    with caplog.at_level(logging.DEBUG):
+        visitor = parse_and_visit("""unknown("Hi")""")
+    assert "Function unknown not found in current scope" in caplog.text
+
+    # TODO(tihoph): check the branch
+    visitor = parse_and_visit("attr()()")
+    visitor = parse_and_visit("attr.call()")
+    # attr and calls being called is just passed
+
+
 @pytest.mark.parametrize(
-    ("name", "log_text"),
+    ("code", "log_text"),
     [
-        ("func", "Visiting resolved function"),
-        ("already", "has already been visited, skipping"),
-        ("inner", "Visiting resolved function"),
-        ("print", "is a built-in, skipping visit"),
-        ("unknown", "not found in current scope"),
+        ("def func(): pass\nfunc()", "Visiting resolved function func"),
+        ("def func(): pass\ndef func2(): pass\nfunc2()", "Visiting resolved function func2"),
+        ("def func(): pass\nfunc()\nfunc()", "has already been visited, skipping"),
+        ("def func():\n  def inner(): pass\n  inner()", "Visiting resolved function inner"),
+        ("print()", "is a built-in, skipping visit"),
+        ("unknown()", "not found in current scope"),
     ],
 )
-def test_resolve_and_visit(name: str, log_text: str, caplog: pytest.LogCaptureFixture) -> None:
-    """Test resolve_and_visit method."""
-    func_node = _make_func()
-    inner_node = _make_func("inner")
-    node = _make_name()
-    visitor = ScopeVisitor("test_mod")
-    visitor.tracker.add_func("func", func_node)
-
-    if name == "already":
-        visitor.tracker.mark_visited(func_node)
-        name = "func"
-
-    with visitor.tracker.scope(node), caplog.at_level(logging.DEBUG):
-        visitor.tracker.add_func("inner", inner_node)
-        visitor.resolve_and_visit(name)
-
+def test_resolve_and_visit(code: str, log_text: str, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.DEBUG):
+        parse_and_visit(code)
     assert log_text in caplog.text
-    if name == "func":
-        assert visitor.tracker.is_visited(func_node)
-
-    if name == "inner":  # after exiting the scope of 'func', 'inner' should be hidden
-        assert visitor.tracker.is_visited(inner_node)
-        with caplog.at_level(logging.DEBUG):
-            visitor.resolve_and_visit(name)
-            assert "not found in current scope" in caplog.text
 
 
 def test_visit_deferred() -> None:
     """Test FunctionBodyWrapper accept method."""
     tree = ast.parse("def func():\n  def inner(): pass\ndef func2(): pass")
+    add_parents(tree)
     func_node: ast.FunctionDef = tree.body[0]  # type: ignore[assignment]
     inner_node: ast.FunctionDef = func_node.body[0]  # type: ignore[assignment]
     func2_node: ast.FunctionDef = tree.body[1]  # type: ignore[assignment]
@@ -395,14 +546,13 @@ def test_visit_deferred() -> None:
 
     visitor.deferred.append(wrapper)  # Add to deferred list
     visitor.deferred.append(wrapper2)  # Add another deferred function
-    assert visitor.deferred == [wrapper, wrapper2]
+    assert visitor.deferred == deque([wrapper, wrapper2])
 
     visitor.visit_deferred()
 
-    assert len(visitor.deferred) == 3  # Check if inner function was added
+    assert len(visitor.deferred) == 0  # Check if inner function was added
     assert visitor.tracker.visited_funcs == [id(func_node), id(inner_node), id(func2_node)]
-    assert visitor.deferred[-1].function == inner_node
-    inner_wrapper = visitor.deferred[-1]
+    inner_wrapper = visitor._visited_nodes[2]
     assert visitor._visited_nodes == [
         wrapper,
         inner_node,
@@ -413,67 +563,37 @@ def test_visit_deferred() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    ("code", "add", "dep_graph", "unresolved"),
-    [
-        ("def func(): ...", [], {ModDef: set(), FuncDef: set()}, []),
-        ("def func(): ...", ["func"], {ModDef: {FuncDef}, FuncDef: set()}, []),
-        ("def func(): ...", ["test_module.func"], {ModDef: {FuncDef}, FuncDef: set()}, []),
-        ("def func():\n  def inner(): pass", [], {ModDef: set(), FuncDef: set()}, []),
-        ("def func():\n  def inner(): pass", ["func"], {ModDef: {FuncDef}, FuncDef: set()}, []),
-        ("def func():\n  def inner(): pass", ["inner"], {ModDef: set(), FuncDef: set()}, ["inner"]),
-        ("import os", [], {ModDef: set()}, []),
-    ],
-)
-def test_add(
-    code: str,
-    add: list[str],
-    dep_graph: dict[Definition, set[Definition | Import]],
-    unresolved: list[str],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Test the ScopeVisitor class."""
-    # Create a simple module with a function and an import
-    visitor = parse_and_visit(code)
-    with caplog.at_level(logging.DEBUG):
-        for name in add:
-            visitor.add(name)
-    for elem in unresolved:
-        assert f"Could not resolve name '{elem}'." in caplog.text
-    assert visitor.dep_graph == dep_graph
-
-
 def test_function_body_wrapper_init() -> None:
     """Test FunctionBodyWrapper initialization."""
-    func_node = _make_func()
-    mod = ast.Module([], [])
-    func_node.parent = mod  # type: ignore[attr-defined]
+    tree = ast.parse("def func(): pass")
+    add_parents(tree)
+    func_node: ast.FunctionDef = tree.body[0]  # type: ignore[assignment]
     tracker = ScopeTracker()
     wrapper = FunctionBodyWrapper(func_node, tracker)
     assert wrapper.function == func_node
     assert wrapper.custom_name == "func"
-    assert wrapper.custom_parent == mod
+    assert wrapper.custom_parent == tree
     assert wrapper.tracker == tracker
 
 
 def test_function_body_wrapper_accept() -> None:
     """Test FunctionBodyWrapper accept method."""
-    func_node: ast.FunctionDef = ast.parse("def func():\n  def inner(): pass").body[0]  # type: ignore[assignment]
+    tree = ast.parse("def func():\n  def inner(): pass")
+    add_parents(tree)
+    func_node: ast.FunctionDef = tree.body[0]  # type: ignore[assignment]
     inner_node: ast.FunctionDef = func_node.body[0]  # type: ignore[assignment]
     visitor = ScopeVisitor("test_mod", debug=True)
     wrapper = FunctionBodyWrapper(func_node, visitor.tracker)
     visitor.deferred.append(wrapper)  # Add to deferred list
-    assert visitor.deferred == [wrapper]
+    assert visitor.deferred == deque([wrapper])
+    wrapper = visitor.deferred.popleft()
     visitor.tracker.mark_visited(wrapper.function)
     wrapper.accept(visitor)  # Call accept method
 
     # assert that the inner func was added to new deferred
-    assert len(visitor.deferred) == 2
-    assert visitor.deferred[0] == wrapper
-    assert isinstance(visitor.deferred[1], FunctionBodyWrapper)
-    inner_wrapper = visitor.deferred[1]
-    assert inner_wrapper.function == inner_node
+    assert len(visitor.deferred) == 0
     # TODO(tihoph): Check if args were added to scope etc.
 
+    inner_wrapper = visitor._visited_nodes[1]
     assert visitor.tracker.visited_funcs == [id(func_node), id(inner_node)]
     assert visitor._visited_nodes == [inner_node, inner_wrapper, inner_node.body[0]]

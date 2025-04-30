@@ -1,0 +1,4 @@
+PathLike  # unused import (deprive/collect.py:19)
+_.const_val  # unused attribute (tests/_assets/simple_proj/main_module.py:20)
+AllDef  # unused variable (tests/test_visitor.py:29)
+nested_func  # unused function (tests/_assets/simple_proj/nested_pkg/nester.py:8)

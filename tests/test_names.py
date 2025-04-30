@@ -43,7 +43,7 @@ def test_path_to_fqn_outside_root() -> None:
 
 
 @pytest.mark.parametrize(
-    ("source", "expected_names"),
+    ("code", "expected"),
     [
         ("def my_func(): pass", "my_func"),
         ("async def my_async_func(): pass", "my_async_func"),
@@ -67,12 +67,18 @@ def test_path_to_fqn_outside_root() -> None:
         # Complex target assignments
         ("x.y = 1", None),  # Attribute target is ignored
         ("a[0] = 1", None),  # Subscript target is ignored
+        ("x.y: int  = 1", None),  # Attribute target is ignored
+        ("a[0]: int = 1", None),  # Subscript target is ignored
+        ("global x", ("x",)),
+        ("global x, y", ("x", "y")),
+        ("nonlocal x", ("x",)),
+        ("nonlocal x, y", ("x", "y")),
     ],
 )
-def test_get_node_defined_names(source: str, expected_names: tuple[str, ...] | str | None) -> None:
+def test_get_node_defined_names(code: str, expected: tuple[str, ...] | str | None) -> None:
     """Test extraction of defined names from various AST nodes."""
-    node = ast.parse(source).body[0]
-    assert get_node_defined_names(node) == expected_names
+    node = ast.parse(code).body[0]
+    assert get_node_defined_names(node) == expected
 
 
 def test_get_node_defined_names_custom_name() -> None:

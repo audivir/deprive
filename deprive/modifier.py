@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,8 @@ from deprive.visitor import Definition, DepGraph, Import
 
 if TYPE_CHECKING:
     from collections.abc import Collection
+
+logger = logging.getLogger(__name__)
 
 
 # TODO(tihoph): split this into multiple functions.
@@ -57,6 +60,7 @@ def _modify_module(
 
     new_code = handle_module(code, required_imports, keep_definitions)
     if not new_code and rel_path.name != "__init__.py":
+        logger.debug("Skipping empty module %s", rel_path)
         return
     # create the new directory
     parent = output / rel_path.parent
@@ -73,7 +77,7 @@ def modify_package(root_dir: StrPath, required: Collection[str], output: StrPath
     if not output.is_dir():
         raise ValueError(f"Output {output} must be a directory")
 
-    graph = collect_package(root_dir, required)
+    graph = collect_package(root_dir)
     tracked = track_dependencies(root_name, graph, required)
 
     # select only the modules

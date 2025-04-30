@@ -67,17 +67,22 @@ def empty_func():
         _get_curr_def("other_func"): {Import("importlib.util")},
         _get_curr_def("use_constant"): {_get_curr_def("CONSTANT")},
         _get_curr_def("empty_func"): set(),
-        _get_curr_def("Test"): {Import("test.subpkg"), Import("importlib.util")},
+        _get_curr_def("Test"): {
+            Import("pathlib"),
+            Import("sys"),
+            Import("test.subpkg"),
+            Import("importlib.util"),
+        },
         _get_curr_def("CONSTANT"): {Import(("multiprocessing", "cpu_count"))},
         _get_curr_def("OTHER_CONSTANT"): {Import(("multiprocessing", "current_process"))},
     }
     file_path.write_text(code)
 
     dependencies = collect_module(file_path, root_dir)
-    assert dependencies == expected
-    dependencies_added = collect_module(file_path, root_dir, ["CONSTANT", f"{module}.Test"])
-    dependencies[_get_curr_def()] |= {_get_curr_def("CONSTANT"), _get_curr_def("Test")}
-    assert dependencies_added == dependencies
+    # missing keys
+    assert set(dependencies) == set(expected)
+    for key, value in expected.items():
+        assert dependencies[key] == value
 
 
 def test_collect_module_init(tmp_path: Path) -> None:
@@ -104,6 +109,7 @@ def test_collect_package_small() -> None:
 
     expected = {
         Definition("nested_pkg", None): set(),
+        Definition("nested_pkg", "__all__"): set(),
         Definition("nested_pkg.nester", None): set(),
         Definition("nested_pkg.nester", "nested_func"): {
             Import(("simple_proj.utils", "helper_func"))
@@ -122,6 +128,7 @@ def test_collect_package_large() -> None:
     expected = {
         Definition("simple_proj", None): set(),
         _get_curr_def("main_module"): set(),
+        _get_curr_def("main_module", "__all__"): set(),
         _get_curr_def("main_module", "MainClass"): {
             Import("pathlib", "pathlib_alias"),
             Import(("simple_proj.utils", "HelperClass")),
@@ -141,10 +148,12 @@ def test_collect_package_large() -> None:
         _get_curr_def("independent", "INDEP_CONST"): set(),
         _get_curr_def("independent", "indep_func"): {_get_curr_def("independent", "INDEP_CONST")},
         _get_curr_def("nested_pkg"): set(),
+        _get_curr_def("nested_pkg", "__all__"): set(),
         _get_curr_def("nested_pkg.nester"): set(),
         _get_curr_def("nested_pkg.nester", "nested_func"): {
             Import(("simple_proj.utils", "helper_func"))
         },
     }
-
-    assert dependencies == expected
+    assert set(dependencies) == set(expected)
+    for key, value in dependencies.items():
+        assert value == expected[key]

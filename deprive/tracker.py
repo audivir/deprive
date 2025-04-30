@@ -24,13 +24,16 @@ def _recursively_track(  # noqa: C901,PLR0912
         module_def = Definition(elem.module, None)
         subdefs = input_graph.get(module_def, None)
         if subdefs is None:
-            raise ValueError(f"Neither element nor module {elem} found in the graph")
+            raise ValueError(f"No matching definition or module found for {elem}")
         calls = {x for x in subdefs if isinstance(x, Import) and x.asname == elem.name}
-        if len(calls) != 1:
-            raise ValueError(f"Should be exactly one import matching {elem}: {calls}")
+        if not calls:
+            raise ValueError(f"No matching definition found for {elem}")
+        if len(calls) > 1:  # pragma: no cover
+            raise ValueError(f"Multiple matching definitions found for {elem}: {calls}")
 
-    if elem in output_graph:
+    if elem in output_graph:  # pragma: no cover
         raise ValueError(f"Element {elem} already tracked")
+
     output_graph[elem] = calls
 
     # add parents
@@ -39,11 +42,9 @@ def _recursively_track(  # noqa: C901,PLR0912
         parent = ".".join(parts[:ix])
         parent_def = Definition(parent, None)
         _recursively_track(root_name, input_graph, output_graph, parent_def)
-        if parent == root_name:
-            break
 
     for call in calls:
-        if isinstance(call, Definition):
+        if isinstance(call, Definition):  # pragma: no cover
             _recursively_track(root_name, input_graph, output_graph, call)
         else:
             if isinstance(call.name, str):

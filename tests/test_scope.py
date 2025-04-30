@@ -1,15 +1,15 @@
-"""Test deprive.scope."""
+"""Test Scope utilities."""
 
+# ruff: noqa: N802
 from __future__ import annotations
 
 import ast
-import logging
 import re
 from typing import Any, Literal
 
 import pytest
 
-from deprive.scope import Scope, ScopeTracker
+from deprive.scope import Scope, ScopeTracker, add_parents
 
 
 def _make_name(name: str = "x") -> ast.Name:
@@ -29,14 +29,35 @@ def _make_assign(annotated: bool = False) -> ast.Assign:
     return ast.parse("x = 1").body[0]  # type: ignore[return-value]
 
 
-def add_parents(node: ast.AST, parent: ast.AST | None = None) -> None:
-    """Recursively add parent pointers to an AST."""
-    node.parent = parent  # type: ignore[attr-defined]
-    for child in ast.iter_child_nodes(node):
-        add_parents(child, node)
+def test_Scope_init() -> None:
+    """Test Scope initialization."""
+    scope = Scope()
+    assert scope.imports == {}
+    assert scope.imports_from == {}
+    assert scope.functions == {}
+    assert scope.names == {}
+    assert scope.global_names == set()
+    assert scope.nonlocal_names == set()
+    assert scope.fields == ({}, {}, {}, {})
+    func_node = _make_func()
+    scope = Scope(
+        imports={"a": "b"},
+        imports_from={"c": ("d", "e")},
+        functions={"f": func_node},
+        names={"h": None},
+        global_names={"j"},
+        nonlocal_names={"k"},
+    )
+    assert scope.imports == {"a": "b"}
+    assert scope.imports_from == {"c": ("d", "e")}
+    assert scope.functions == {"f": func_node}
+    assert scope.names == {"h": None}
+    assert scope.global_names == {"j"}
+    assert scope.nonlocal_names == {"k"}
+    assert scope.fields == ({"a": "b"}, {"c": ("d", "e")}, {"f": func_node}, {"h": None})
 
 
-def test_init() -> None:
+def test_ScopeTracker_init() -> None:
     """Test ScopeTracker initialization."""
     tracker = ScopeTracker()
     assert len(tracker.scopes) == 1
@@ -131,7 +152,7 @@ def test_init() -> None:
 def test_is_in(
     setup_scopes: list[dict[str, Any]],
     name_to_check: str,
-    expected: Literal["outermost", "inner"] | None,
+    expected: Literal["inner", "outermost"] | None,
 ) -> None:
     """Test ScopeTracker.is_in method."""
     tracker = ScopeTracker()
@@ -149,10 +170,15 @@ def test_is_in(
     if not tracker.scopes:
         tracker.scopes.append(Scope())
 
-    inner_expected = expected == "inner"
     all_expected = expected is not None
+    inner_expected = expected == "inner"
     assert tracker.is_in(name_to_check) == all_expected
     assert tracker.is_in(name_to_check, inner_only=True) == inner_expected
+    assert tracker.is_local(name_to_check) == inner_expected
+
+    if inner_expected:
+        tracker.current_scope.global_names.add(name_to_check)
+        assert not tracker.is_local(name_to_check)
 
 
 @pytest.mark.parametrize(
@@ -356,7 +382,7 @@ def test_scope_context_manager() -> None:
 
         # Check scope popped correctly
         assert len(tracker.scopes) == 2
-        assert tracker.scopes[-1] is inner_scope1
+        assert tracker.current_scope is inner_scope1
 
     # Check scope popped correctly
     assert len(tracker.scopes) == 1
@@ -395,12 +421,12 @@ def test_push_pop() -> None:
     # Pop second scope
     tracker.pop()
     assert len(tracker.scopes) == 2
-    assert tracker.scopes[-1] is scope1
+    assert tracker.current_scope is scope1
 
     # Pop first scope
     tracker.pop()
     assert len(tracker.scopes) == 1
-    assert tracker.scopes[-1] is initial_scope
+    assert tracker.current_scope is initial_scope
 
     # Test pushing existing node raises error
     tracker = ScopeTracker()
@@ -491,7 +517,7 @@ def test_add_name(
             tracker.add_name(name, node)
     else:
         tracker.add_name(name, node)
-        current_scope = tracker.scopes[-1]
+        current_scope = tracker.current_scope
         # Use Ellipsis to check for presence and avoid exact node comparison if not needed
         assert len(current_scope.names) == len(expected_names)
         for n in expected_names:
@@ -558,158 +584,82 @@ def test_add_import() -> None:
     tracker = ScopeTracker()
 
     # Test ast.Import
-    node_import = ast.parse("import os as myos").body[0]
-    assert isinstance(node_import, ast.Import)
-    tracker.add_import(node_import)
-    assert tracker.scopes[-1].imports == {"myos": "os"}
-    assert tracker.scopes[-1].imports_from == {}
+    node_import: ast.Import = ast.parse("import os as myos").body[0]  # type: ignore[assignment]
+    tracker.add_import(node_import.names[0], None)
+    assert tracker.current_scope.imports == {"myos": "os"}
+    assert tracker.current_scope.imports_from == {}
+
+    with pytest.raises(NotImplementedError, match="Redefining imports.*not supported"):
+        tracker.add_import(node_import.names[0], None)
 
     # Reset scope imports for next test
     tracker = ScopeTracker()
 
     # Test ast.ImportFrom
-    node_import_from = ast.parse("from sys import argv as a").body[0]
-    assert isinstance(node_import_from, ast.ImportFrom)
-    tracker.add_import(node_import_from)
-    assert tracker.scopes[-1].imports == {}
-    assert tracker.scopes[-1].imports_from == {"a": ("sys", "argv")}
+    node_import_from: ast.ImportFrom = ast.parse("from sys import argv as a").body[0]  # type: ignore[assignment]
+    tracker.add_import(node_import_from.names[0], node_import_from.module)
+    assert tracker.current_scope.imports == {}
+    assert tracker.current_scope.imports_from == {"a": ("sys", "argv")}
+
+    with pytest.raises(NotImplementedError, match="Redefining imports.*not supported"):
+        tracker.add_import(node_import_from.names[0], None)
 
 
-@pytest.mark.parametrize(
-    ("code", "expected", "log_check"),
-    [
-        # Success cases
-        ("import os", {"imports": {"os": "os"}}, ("Found import:", "import os as os")),
-        (
-            "import sys as system",
-            {"imports": {"system": "sys"}},
-            ("Found import:", "import sys as system"),
-        ),
-        # Error cases
-        ("import os, sys", (NotImplementedError, "Multiple imports.*not supported"), None),
-        (
-            "import os\nimport os",
-            (NotImplementedError, "Redefining imports.*not supported"),
-            None,
-        ),  # Requires adding import first
-        (
-            "import sys\nimport os as sys",
-            (NotImplementedError, "Redefining imports.*not supported"),
-            None,
-        ),  # Requires adding import first
-    ],
-    ids=["simple", "alias", "error_multiple", "error_redefine_direct", "error_redefine_alias"],
-)
-def test_handle_import(
-    code: str,
-    expected: dict[str, str] | tuple[type[Exception], str],
-    log_check: tuple[str, str],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Test ScopeTracker._handle_import method."""
-    # Note: Redefining tests require manual setup before the tested call
+def test_add_global() -> None:
     tracker = ScopeTracker()
-    node = ast.parse(code).body[0]
-    assert isinstance(node, ast.Import)
 
-    if "Redefining" in str(expected):
-        # Pre-add the conflicting import
-        conflicting_name = "os" if "import os\nimport os" in code else "sys"
-        tracker.scopes[-1].imports[conflicting_name] = (
-            "some_module"  # Value doesn't strictly matter here
-        )
+    global_node: ast.Global = ast.parse("global x").body[0]  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="Global keyword in outer scope redundant"):
+        tracker.add_global(global_node)
 
-    if isinstance(expected, tuple) and issubclass(expected[0], Exception):
-        exc, msg = expected
-        with pytest.raises(exc, match=msg):
-            tracker._handle_import(node)  # noqa: SLF001
-        return
-
-    assert isinstance(expected, dict)
-    with caplog.at_level(logging.DEBUG):
-        tracker._handle_import(node)  # noqa: SLF001
-    current_scope = tracker.scopes[-1]
-    assert current_scope.imports == expected.get("imports", {})
-    assert current_scope.imports_from == expected.get("imports_from", {})
-    assert current_scope.functions == {}
-    assert current_scope.names == {}
-    assert log_check is not None  # should already be returned at error branch
-    assert log_check[0] in caplog.text
-    assert log_check[1] in caplog.text
+    name_node = _make_name()
+    with tracker.scope(name_node):
+        tracker.add_global(global_node)
+        assert tracker.current_scope.global_names == {"x"}
 
 
-@pytest.mark.parametrize(
-    ("code", "expected"),
-    [
-        # Success cases
-        ("from os import path", {"imports_from": {"path": ("os", "path")}}),
-        ("from sys import argv as a", {"imports_from": {"a": ("sys", "argv")}}),
-        (
-            "from os import path, environ",
-            {"imports_from": {"path": ("os", "path"), "environ": ("os", "environ")}},
-        ),
-        (
-            "from os import path, environ as env",
-            {"imports_from": {"path": ("os", "path"), "env": ("os", "environ")}},
-        ),
-        # Error cases
-        ("from . import mymod", (NotImplementedError, "Relative imports.*not supported")),
-        ("from .mymod import myfunc", (NotImplementedError, "Relative imports.*not supported")),
-        ("from .. import mymod", (NotImplementedError, "Relative imports.*not supported")),
-        ("from os import *", (NotImplementedError, "Star imports.*not supported")),
-        (
-            "from os import path\nfrom sys import path",
-            (NotImplementedError, "Redefining imports.*not supported"),
-        ),  # Requires adding import first
-        (
-            "from os import path\nfrom sys import argv as path",
-            (NotImplementedError, "Redefining imports.*not supported"),
-        ),  # Requires adding import first
-    ],
-    ids=[
-        "simple",
-        "alias",
-        "multiple",
-        "multiple_with_alias",
-        "error_relative_dot",
-        "error_relative_dot_mod",
-        "error_relative_dot_dot",
-        "error_star",
-        "error_redefine_direct",
-        "error_redefine_alias",
-    ],
-)
-def test_handle_import_from(
-    code: str,
-    expected: dict[str, dict[str, str] | dict[str, tuple[str, str]]] | tuple[type[Exception], str],
-) -> None:
-    """Test ScopeTracker._handle_import_from method."""
-    # Note: Redefining tests require manual setup before the tested call
+def test_add_nonlocal() -> None:
     tracker = ScopeTracker()
-    node = ast.parse(code).body[-1]
-    assert isinstance(node, ast.ImportFrom)
 
-    if "Redefining" in str(expected):
-        # Pre-add the conflicting import
-        tracker.scopes[-1].imports_from["path"] = (
-            "some_module",
-            "some_name",
-        )  # Value doesn't strictly matter
+    nonlocal_node: ast.Nonlocal = ast.parse("nonlocal x").body[0]  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="Nonlocal keyword must be used in nested scope"):
+        tracker.add_nonlocal(nonlocal_node)
 
-    if isinstance(expected, tuple) and issubclass(expected[0], Exception):
-        exc, msg = expected
-        with pytest.raises(exc, match=msg):
-            tracker._handle_import_from(node)  # noqa: SLF001
-        return
+    name_node = _make_name()
+    with tracker.scope(name_node):
+        with pytest.raises(ValueError, match="Nonlocal keyword must be used in nested scope"):
+            tracker.add_nonlocal(nonlocal_node)
 
-    assert isinstance(expected, dict)
-    tracker._handle_import_from(node)  # noqa: SLF001
-    current_scope = tracker.scopes[-1]
-    # Custom comparison for imports_from value tuple
-    expected_imports_from = expected.get("imports_from", {})
-    assert current_scope.imports_from.keys() == expected_imports_from.keys()
-    for key, val in expected_imports_from.items():
-        assert current_scope.imports_from[key] == val
-    assert current_scope.imports == expected.get("imports", {})
-    assert current_scope.functions == {}
-    assert current_scope.names == {}
+        other_name_node = _make_name()
+        with tracker.scope(other_name_node):
+            tracker.add_nonlocal(nonlocal_node)
+            assert tracker.current_scope.nonlocal_names == {"x"}
+
+
+def test_global_nonlocal_exclusive() -> None:
+    global_node: ast.Global = ast.parse("global x").body[0]  # type: ignore[assignment]
+    nonlocal_node: ast.Nonlocal = ast.parse("nonlocal x").body[0]  # type: ignore[assignment]
+
+    tracker = ScopeTracker()
+    outer_name_node = _make_name()
+    with tracker.scope(outer_name_node):
+        name_node = _make_name()
+        with tracker.scope(name_node):
+            tracker.add_global(global_node)
+            with pytest.raises(ValueError, match="Global and nonlocal are mutually exclusive"):
+                tracker.add_nonlocal(nonlocal_node)
+
+        other_name_node = _make_name()
+        with tracker.scope(other_name_node):
+            tracker.add_nonlocal(nonlocal_node)
+            with pytest.raises(ValueError, match="Global and nonlocal are mutually exclusive"):
+                tracker.add_global(global_node)
+
+
+def test_add_parents() -> None:
+    tree = ast.parse("def func(): pass")
+    add_parents(tree)
+    func_node: ast.FunctionDef = tree.body[0]  # type: ignore[assignment]
+    pass_node: ast.Pass = func_node.body[0]  # type: ignore[assignment]
+    assert pass_node.parent == func_node  # type: ignore[attr-defined]
+    assert func_node.parent == tree  # type: ignore[attr-defined]

@@ -8,12 +8,9 @@ pip install deprive
 
 # Disabled Python Features
 If one of the disabled features is used, a `NotImplementedError` will be raised:
-1. `global` and `nonlocal` keywords.
-2. Star imports (e.g., `from module import *`).
-3. Relative imports (e.g., `from . import module`).
-4. Multiple imports in a single statement (e.g., `import os, sys`).
-5. Redefining imports (independent of the scope).
-6. Multiple statements per line (e.g., `a = 1; b = 2`).
+1. Star imports (e.g., `from module import *`).
+2. Redefining imports (independent of the scope).
+3. Multiple statements per line (e.g., `a = 1; b = 2`).
 
 # Discouraged Python Features
 These following features don't raise any warning or errors, but the correctness of the output is not guaranteed:
@@ -21,9 +18,6 @@ These following features don't raise any warning or errors, but the correctness 
 2. Overwriting built-in functions.
 3. Assigning functions to variables.
 4. Namespace packages (e.g., no `__init__.py` in a package).
-
-# TODO
-- Rewrite `__all__`: eval original all and only set still valid ones.
 
 # Changelog
 

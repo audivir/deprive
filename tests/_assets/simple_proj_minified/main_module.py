@@ -28,14 +28,4 @@ class MainClass:
         return json.dumps({"result": processed_data})
 
 
-def main_func() -> str:
-    """Main function that creates an instance of MainClass and processes data."""
-    instance = MainClass()
-    return instance.process(5)
-
-
-# Constant using another constant
-OTHER_CONST = CONST + 1
-
-
-__all__ = ["OTHER_CONST", "MainClass", "main_func"]  # fmt: skip
+__all__ = ["MainClass"]  # fmt: skip
