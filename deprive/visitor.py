@@ -31,7 +31,8 @@ class Import:
     """Data class for representing an import statement."""
 
     name: tuple[str, str] | str = field(hash=True)
-    asname: str = field(default="0", hash=True)  # 0 is no valid identifier so it can default value
+    # 0 is no valid identifier so it can default value
+    asname: str | None = field(default="0", hash=True)
 
     def __post_init__(self) -> None:
         if self.asname == "0":
@@ -47,22 +48,24 @@ class Definition:
     name: str | None = field(hash=True)
 
 
-def get_args(node: FuncType) -> list[ast.arg]:
+def get_args(node: FuncType) -> tuple[list[ast.arg], list[ast.expr]]:
     """Get all arguments of a function node."""
     all_args = node.args.args + node.args.posonlyargs + node.args.kwonlyargs
     if node.args.vararg:
         all_args.append(node.args.vararg)
     if node.args.kwarg:
         all_args.append(node.args.kwarg)
-    return all_args
+    defaults = [item for item in node.args.defaults + node.args.kw_defaults if item is not None]
+    return all_args, defaults
 
 
 class ScopeVisitor(ast.NodeVisitor):
     """Visitor that tracks function definitions and their scopes."""
 
-    def __init__(self, fqn: str, debug: bool = False) -> None:
+    def __init__(self, fqn: str, init: bool = False, debug: bool = False) -> None:
         """Initialize the visitor."""
         self.module_fqn = fqn
+        self.init = init
 
         self.tracker = ScopeTracker()
 
@@ -76,13 +79,7 @@ class ScopeVisitor(ast.NodeVisitor):
 
         self.all: list[str] | None = None
 
-    def run(self, code: str) -> None:
-        """Run the visitor on a given code string."""
-        tree = ast.parse(code)
-        tree.custom_name = self.module_fqn  # type: ignore[attr-defined]
-        add_parents(tree)
-        self.visit(tree)
-        self.visit_deferred()
+    def _add_top_level_defs(self) -> None:
         # verify result and add all outer scope names to the dependency graph
         outer_scope = self.tracker.scopes[0]
         top_level_names = set(outer_scope.names)
@@ -94,6 +91,49 @@ class ScopeVisitor(ast.NodeVisitor):
         for name in top_level_defs:
             if name not in self.dep_graph:
                 self.dep_graph[name] = set()
+
+    def _add_imports(self) -> None:
+        # add imports to the dependency graph
+        outer_scope = self.tracker.scopes[0]
+        top_level_imports = outer_scope.imports
+
+        # add names in __all__ to the dependency graph
+        if self.all:
+            for exported_name in self.all:
+                definition = Definition(self.module_fqn, exported_name)
+                if definition not in self.dep_graph:
+                    if found_imports := top_level_imports.get(exported_name, None):
+                        self.dep_graph[definition] = {
+                            Import(x[0] if len(x) == 2 else x[:2], exported_name)  # noqa: PLR2004
+                            for x in found_imports
+                        }
+                    else:
+                        raise ValueError("Name in __all__ neither defined nor an import")
+
+        # if own name is __init__ imports with an alias name should be added
+        if self.module_fqn.endswith(".__init__"):
+            for alias, imports in top_level_imports.items():
+                definition = Definition(self.module_fqn, alias)
+                imports_to_add: set[Definition | Import] = set()
+                for curr_import in imports:
+                    exported_import = curr_import[-1]
+                    actual_import = curr_import[0] if len(curr_import) == 2 else curr_import[:2]  # noqa: PLR2004
+                    # only add explicit aliased imports
+                    if not exported_import:
+                        continue
+                    imports_to_add.add(Import(actual_import, exported_import))
+                if imports_to_add:
+                    self.dep_graph[definition] = imports_to_add
+
+    def run(self, code: str) -> None:
+        """Run the visitor on a given code string."""
+        tree = ast.parse(code)
+        tree.custom_name = self.module_fqn  # type: ignore[attr-defined]
+        add_parents(tree)
+        self.visit(tree)
+        self.visit_deferred()
+        self._add_top_level_defs()
+        self._add_imports()
 
     @override
     def visit(self, node: ast.AST) -> None:
@@ -132,6 +172,7 @@ class ScopeVisitor(ast.NodeVisitor):
         if node.level != 0:
             parts = self.module_fqn.split(".")
             if node.level >= len(parts):
+                # if module is __init__ this fails
                 raise ValueError("Relative import is deeper than module FQN.")
             parts = parts[: -node.level]
             module = ".".join(parts)
@@ -157,22 +198,30 @@ class ScopeVisitor(ast.NodeVisitor):
         own_name = own_name[len(self.module_fqn) + 1 :].split(".")[0]
         return Definition(self.module_fqn, own_name or None)
 
-    def _visit_load(self, name: str, node: ast.AST, strict: bool = True) -> bool:
+    def _visit_load(
+        self, name: str, node: ast.AST, strict: bool = True
+    ) -> tuple[Definition, list[Import]] | bool:
         """Visit a name being loaded (used)."""
         # Name is being used (Load context)
         # Check if it's known variable
         if self.tracker.is_in(name):
-            if import_elem := self.tracker.is_import(name):
-                # Imports are always added to graph.
-                target_def: Import | Definition = Import(import_elem, name)
-            elif self.tracker.is_local(name):
-                # Don't add local variables to graph.
-                return True
-            else:
-                target_def = Definition(self.module_fqn, name)
             own_def = self._get_node_def(node)
 
-            self.dep_graph.setdefault(own_def, set()).add(target_def)
+            if import_elem := self.tracker.is_import(name):
+                # Imports are always added to graph.
+                import_defs: list[Import] = []
+                for curr_import in import_elem:
+                    import_name = curr_import[0] if len(curr_import) == 2 else curr_import[:2]  # noqa: PLR2004
+                    import_def = Import(import_name, name)
+                    self.dep_graph.setdefault(own_def, set()).add(import_def)
+                    import_defs.append(import_def)
+                return own_def, import_defs
+
+            if not self.tracker.is_local(name):
+                # Don't add local variables to graph.
+                target_def = Definition(self.module_fqn, name)
+                self.dep_graph.setdefault(own_def, set()).add(target_def)
+
             return True
         # 5. Check if it's a built-in
         if name in BUILTINS:
@@ -208,10 +257,29 @@ class ScopeVisitor(ast.NodeVisitor):
             raise TypeError(f"Unexpected context: {ctx}")
         self.generic_visit(node)
 
+    def _handle_all(self, node: ast.Assign | ast.AnnAssign | ast.AugAssign) -> None:
+        if node.value is None:
+            raise ValueError("No value for __all__ assignment.")
+        # verify we a re in a module scope
+        if len(self.tracker.scopes) != 1:
+            raise ValueError("__all__ must be defined at the module level.")
+        code = ast.unparse(node.value)
+        contents = ast.literal_eval(code)
+        if not isinstance(contents, (tuple, list)) or not all(
+            isinstance(item, str) for item in contents
+        ):
+            raise TypeError("Expected a tuple or list of literal strings, got: " + code)
+        self.all = list(contents)
+        self.generic_visit(node)
+
     @override
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         """Handle augmented assignment to __all__."""
+        if isinstance(node.target, ast.Name) and node.target.id == "__all__":
+            raise ValueError("Unsupported __all__ definition.")
+
         self.generic_visit(node)  # store first
+
         # also assume aug assign needs to load the target
         target = node.target
         if isinstance(target, ast.Attribute):
@@ -224,18 +292,61 @@ class ScopeVisitor(ast.NodeVisitor):
         self.visit(target)
 
     @override
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        """Handle __all__ seperately from other assignments."""
+        # TODO(tihoph): __all__, other = [...], ... is currently not handled correctly.
+        if isinstance(node.target, ast.Name) and node.target.id == "__all__":
+            self._handle_all(node)
+            return
+
+        self.generic_visit(node)
+
+    @override
+    def visit_Assign(self, node: ast.Assign) -> None:
+        """Handle __all__ seperately from other assignments."""
+        if (
+            len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "__all__"
+        ):
+            self._handle_all(node)
+            return
+
+        names = get_node_defined_names(node, strict=False)
+        if not names:
+            names = ()
+        if isinstance(names, str):
+            names = (names,)
+        # TODO(tihoph): __all__.x should also be forbidden.
+        if "__all__" in names:
+            raise ValueError("Unsupported __all__ definition.")
+
+        self.generic_visit(node)
+
+    @override
     def visit_Attribute(self, node: ast.Attribute) -> None:
         """Visits an attribute access node."""
-        # if attribute is not nested or for storing, do normal processing
-        if isinstance(node.value, ast.Name) or not isinstance(node.ctx, ast.Load):
+        if not isinstance(node.ctx, ast.Load):
             self.generic_visit(node)
             return
 
         parts = get_attribute_parts(node)
+        found: tuple[Definition, list[Import]] | bool = False
         for ix in range(1, len(parts)):
             fqn = ".".join(parts[:ix])
-            if self._visit_load(fqn, node, strict=False):
-                break
+            found = self._visit_load(fqn, node, strict=False)
+        if isinstance(found, tuple):
+            own_def, import_defs = found
+            for import_def in import_defs:
+                import_fqn = (
+                    import_def.name
+                    if isinstance(import_def.name, str)
+                    else ".".join(import_def.name)
+                )
+                if not self.tracker.is_import(f"{import_fqn}.{parts[-1]}"):
+                    self.dep_graph.setdefault(own_def, set()).add(
+                        Import((import_fqn, parts[-1]), None)
+                    )
 
         self.generic_visit(node)
 
@@ -266,15 +377,21 @@ class ScopeVisitor(ast.NodeVisitor):
                     self._visited_nodes.append("returns")
                 self.visit(node.returns)
 
-            args = get_args(node)
+            args, defaults = get_args(node)
             for ix, arg in enumerate(args):
                 if arg.annotation:
                     if self.debug:  # pragma: no cover
                         self._visited_nodes.append(f"arg{ix}_ann")
                     self.visit(arg.annotation)
+            for ix, default in enumerate(defaults):
+                if self.debug:  # pragma: no cover
+                    self._visited_nodes.append(f"default{ix}")
+                self.visit(default)
             name = node.name
 
-        self.tracker.add_func(name, node)
+        if not isinstance(node.parent, ast.ClassDef):  # type: ignore[union-attr]
+            self.tracker.add_func(name, node)
+
         # Do not visit the body yet, just register it
         self.deferred.append(FunctionBodyWrapper(node, self.tracker))
 
@@ -368,7 +485,7 @@ class ScopeVisitor(ast.NodeVisitor):
         # TODO(tihoph): if the name is assigned a new name, we can't resolve it
         if isinstance(node.func, ast.Name):
             self.resolve_and_visit(node.func.id)
-        elif isinstance(node.func, (ast.Attribute, ast.Call)):
+        elif isinstance(node.func, (ast.Attribute, ast.Subscript, ast.Call)):
             pass
         else:  # pragma: no cover
             raise TypeError(f"Expected ast.Name for Call.func, got {type(node.func)}")
@@ -420,15 +537,15 @@ class FunctionBodyWrapper:
 
     def accept(self, visitor: ScopeVisitor) -> None:
         """Accept the visitor and visit the function body."""
-        # store the original deferred functions and only track current ones
-        outer_deferred = visitor.deferred
-        visitor.deferred = deque()
+        # # store the original deferred functions and only track current ones
+        deferred_size = len(visitor.deferred)
         # store the scopes active at the time of function runtime
         outer_scopes = self.tracker.scopes
         self.tracker.scopes = self.scopes
+
         with self.tracker.scope(self.function):
             # add function parameters to the local scope
-            args = get_args(self.function)
+            args, _ = get_args(self.function)
             for arg in args:
                 self.tracker.add_name(arg.arg, arg)
 
@@ -438,8 +555,13 @@ class FunctionBodyWrapper:
                 for stmt in self.function.body:
                     visitor.visit(stmt)
         # visit the inner deferred functions
+        deferred_list = list(visitor.deferred)
+        outer_deferred = deferred_list[:deferred_size]
+        # inner deferred functions are visited now
+        visitor.deferred = deque(deferred_list[deferred_size:])
+        # visit the inner deferred functions
         visitor.visit_deferred()
         # restore the outer deferred functions
-        visitor.deferred = outer_deferred
+        visitor.deferred = deque(outer_deferred)
         # restore the outer scopes
         self.tracker.scopes = outer_scopes

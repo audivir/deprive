@@ -31,29 +31,25 @@ def _modify_module(
         if k.module == module_def.module:
             calls.update(v)
 
-    # TODO(tihoph): mark packages as such
-    if module_def.module == root_name:
-        path_parts = ["__init__"]
-    else:
-        path_parts = module_def.module[len(root_name) + 1 :].split(".")
+    # remove the root name from the module name
+    path_parts = module_def.module[len(root_name) + 1 :].split(".")
 
     rel_path = Path(*path_parts)
 
     full_path = root_dir / rel_path
 
-    # read the original code
-    if full_path.is_dir():
-        rel_path /= "__init__.py"
-        full_path /= "__init__.py"
-    else:
-        rel_path = rel_path.with_suffix(".py")
-        full_path = full_path.with_suffix(".py")
+    # append suffix to the path to get the file name
+    rel_path = rel_path.with_suffix(".py")
+    full_path = full_path.with_suffix(".py")
+
     code = full_path.read_text()
 
     required_imports: set[str] = set()
     keep_definitions: set[str] = set()
     for call in calls:
         if isinstance(call, Import):
+            if not call.asname:
+                continue
             required_imports.add(call.asname)
         elif call.module == module_def.module and call.name:
             keep_definitions.add(call.name)

@@ -21,7 +21,14 @@ These following features don't raise any warning or errors, but the correctness 
 
 # Changelog
 
+## 0.3.0
+- Add attributes of imports to the dependency graph.
+
 ## 0.1.2 - Initial Release
 - Initial implementation of the deprive library.
 - Support for parsing Python files and generating dependency graphs.
 - Codes needs to be cleaned up and refactored.
+
+# TODO:
+- parse type annotations
+- add tests for handler, and add a enum or similar to the _assets proj

@@ -28,10 +28,11 @@ FuncType: TypeAlias = "ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda"
 class Scope:
     """Represents a scope in the AST."""
 
-    imports: dict[str, str] = field(default_factory=dict)  # alias -> module_fqn
-    imports_from: dict[str, tuple[str, str]] = field(
+    # alias -> module_fqn
+    # name -> source_item_fqn (e.g., {'os_path': 'os.path'})
+    imports: dict[str, list[tuple[str, str | None] | tuple[str, str, str | None]]] = field(
         default_factory=dict
-    )  # name -> source_item_fqn (e.g., {'os_path': 'os.path'})
+    )
     functions: dict[str | int, FuncType] = field(default_factory=dict)
     names: dict[str, ast.AST | None] = field(default_factory=dict)
     global_names: set[str] = field(default_factory=set)
@@ -41,13 +42,12 @@ class Scope:
     def fields(
         self,
     ) -> tuple[
-        dict[str, str],
-        dict[str, tuple[str, str]],
+        dict[str, list[tuple[str, str | None] | tuple[str, str, str | None]]],
         dict[str | int, FuncType],
         dict[str, ast.AST | None],
     ]:
         """Fields of the scope."""
-        return (self.imports, self.imports_from, self.functions, self.names)
+        return (self.imports, self.functions, self.names)
 
 
 class ScopeTracker:
@@ -73,14 +73,14 @@ class ScopeTracker:
         """Check if a name is locally defined and not with a global keyword."""
         return name not in self.current_scope.global_names and self.is_in(name, inner_only=True)
 
-    def is_import(self, name: str, outer_only: bool = False) -> tuple[str, str] | str | None:
+    def is_import(
+        self, name: str, outer_only: bool = False
+    ) -> list[tuple[str, str | None] | tuple[str, str, str | None]] | None:
         """Check if a name is an import."""
         scopes = self.scopes if not outer_only else self.scopes[:1]
         for scope in reversed(scopes):
             if found_import := scope.imports.get(name):
                 return found_import
-            if found_import_from := scope.imports_from.get(name):
-                return found_import_from
         return None
 
     def build_fqn(self, node: ast.AST) -> str | None:
@@ -90,7 +90,7 @@ class ScopeTracker:
         while not isinstance(parent, ast.Module):
             name = get_node_defined_names(parent, strict=False)
             if isinstance(name, tuple):  # pragma: no cover
-                raise TypeError("Multi-name nodes should not occur during FQN building.")
+                name = f"<{id(parent)}>"
             if not name:  # comprehensions, lambdas, etc.
                 name = f"<{id(parent)}>"
             parts.append(name)
@@ -135,8 +135,6 @@ class ScopeTracker:
         if isinstance(name, str):
             name = (name,)
         for n in name:
-            if self.is_import(n):
-                raise NotImplementedError("Redefining imports is not supported yet.")
             self.current_scope.names[n] = node
 
     def resolve_func(self, name: str) -> FuncType | None:
@@ -157,13 +155,13 @@ class ScopeTracker:
     def add_import(self, node: ast.alias, module: str | None) -> None:
         """Add an import to the current scope."""
         alias_name = node.asname or node.name
-        if self.is_import(alias_name):
-            raise NotImplementedError("Redefining imports is not supported yet.")
         if module:
-            self.current_scope.imports_from[alias_name] = (module, node.name)
+            self.current_scope.imports.setdefault(alias_name, []).append(
+                (module, node.name, node.asname)
+            )
             logger.debug("Found import: from %s import %s as %s", module, node.name, alias_name)
         else:
-            self.current_scope.imports[alias_name] = node.name
+            self.current_scope.imports.setdefault(alias_name, []).append((node.name, node.asname))
             logger.debug("Found import: import %s as %s", node.name, alias_name)
 
     def add_global(self, node: ast.Global) -> None:

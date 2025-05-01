@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 import libcst as cst
 from libcst._nodes.base import CSTNode
-from libcst._nodes.expression import List, Name, SimpleString
+from libcst._nodes.expression import Attribute, List, Name, SimpleString, Tuple
 from libcst._nodes.module import Module
 from libcst._nodes.op import ImportStar
 from libcst._nodes.statement import (
@@ -19,11 +19,13 @@ from libcst._nodes.statement import (
     BaseStatement,
     Else,
     Expr,
+    Finally,
     If,
     Import,
     ImportAlias,
     ImportFrom,
     SimpleStatementLine,
+    Try,
 )
 from typing_extensions import TypeAlias
 
@@ -34,9 +36,7 @@ if TYPE_CHECKING:
 
 T = TypeVar("T", bound=CSTNode)
 
-AllTypes: TypeAlias = (
-    "BaseStatement | BaseSmallStatement | SimpleStatementLine | BaseCompoundStatement | If | Else"
-)
+AllTypes: TypeAlias = "BaseStatement | BaseSmallStatement | SimpleStatementLine | BaseCompoundStatement | If | Else | Try | Finally"  # noqa: E501
 
 
 def to_ast(elem: CSTNode) -> ast.AST:
@@ -71,12 +71,30 @@ def get_node(
     return None
 
 
+def _extract_attribute_name(attr: Attribute) -> str:
+    """Extract the name of an attribute."""
+    parts: list[str] = [attr.attr.value]
+    while not isinstance(attr.value, Name):
+        parts.append(attr.attr.value)
+        if not isinstance(attr.value, Attribute):  # pragma: no cover
+            raise TypeError(f"Unknown attribute type: {type(attr.value)}")
+        attr = attr.value
+    parts.append(attr.value.value)
+    return ".".join(reversed(parts))
+
+
 def _get_alias(import_alias: ImportAlias) -> str:
     """Get the alias of an import."""
-    name = import_alias.asname.name.value if import_alias.asname else import_alias.name.value  # type: ignore[union-attr]
-    if not isinstance(name, str):  # pragma: no cover
-        raise TypeError(f"Expected str for alias, got {type(name)}")
-    return name
+    if import_alias.asname:
+        name = import_alias.asname.name
+        if not isinstance(name, Name):  # pragma: no cover
+            raise TypeError(f"Unknown import asname type: {type(name)}")
+        return name.value
+    if isinstance(import_alias.name, Name):
+        return import_alias.name.value
+    if isinstance(import_alias.name, Attribute):
+        return _extract_attribute_name(import_alias.name)
+    raise TypeError(f"Unknown import alias type: {type(import_alias.name)}")
 
 
 def handle_import(
@@ -134,10 +152,10 @@ def _filter_all(
     if elem.value is None:
         raise ValueError("No value for __all__ assignment.")
 
-    if not isinstance(elem.value, List) or not all(
+    if not isinstance(elem.value, (Tuple, List)) or not all(
         isinstance(child.value, SimpleString) for child in elem.value.elements
     ):
-        raise TypeError(f"Expected a list of literal strings, got {elem.value}")
+        raise TypeError(f"Expected a tuple or list of literal strings, got {elem.value}")
 
     kept_elements = [
         child
@@ -193,11 +211,34 @@ def _handle_if_else(elem: If | Else, required: set[str], keep: set[str]) -> list
     return [] if not new_body else [elem]
 
 
+def _handle_try_finally(
+    elem: Try | Finally, required: set[str], keep: set[str]
+) -> list[Try | Finally]:
+    new_body: list[AllTypes] = []
+    for stmt in elem.body.body:
+        _handle_body_elem(stmt, new_body, required, keep)
+    elem_body = elem.body.with_changes(body=new_body)
+    elem = elem.with_changes(body=elem_body)
+    if isinstance(elem, Try):
+        if elem.orelse:
+            new_orelse_list = _handle_if_else(elem.orelse, required, keep)
+            new_orelse = new_orelse_list[0] if new_orelse_list else None
+            elem = elem.with_changes(orelse=new_orelse)
+        if elem.finalbody:
+            new_finalbody_list = _handle_try_finally(elem.finalbody, required, keep)
+            new_finalbody = new_finalbody_list[0] if new_finalbody_list else None
+            elem = elem.with_changes(finalbody=new_finalbody)
+        return [] if not new_body and not elem.orelse and not elem.finalbody else [elem]
+    return [] if not new_body else [elem]
+
+
 def _handle_body_elem(
     elem: AllTypes, output: list[AllTypes], required: set[str], keep: set[str]
 ) -> None:
     if isinstance(elem, (If, Else)):
         output.extend(_handle_if_else(elem, required, keep))
+    elif isinstance(elem, (Try, Finally)):
+        output.extend(_handle_try_finally(elem, required, keep))
     elif isinstance(elem, BaseCompoundStatement):
         output.extend(handle_elem(elem, elem, required, keep))
     elif import_elem := get_node(elem, Import) or get_node(elem, ImportFrom):

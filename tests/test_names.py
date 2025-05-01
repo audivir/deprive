@@ -15,8 +15,8 @@ from deprive.names import get_attribute_parts, get_node_defined_names, path_to_f
     [
         ("mod.py", "mytestroot.mod"),
         ("pkg/sub.py", "mytestroot.pkg.sub"),
-        ("pkg/__init__.py", "mytestroot.pkg"),
-        ("__init__.py", "mytestroot"),
+        ("pkg/__init__.py", "mytestroot.pkg.__init__"),
+        ("__init__.py", "mytestroot.__init__"),
         ("pkg", "mytestroot.pkg"),  # Directory itself implies package
     ],
 )

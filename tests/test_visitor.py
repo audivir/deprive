@@ -27,7 +27,7 @@ OsImp = Import("os")
 def parse_and_visit(code: str | Sequence[str], module_fqn: str = "test_module") -> ScopeVisitor:
     """Parses code and runs ScopeVisitor on it."""
     visitor = ScopeVisitor(module_fqn, debug=True)
-    if not isinstance(code, str):
+    if not isinstance(code, str):  # pragma: no cover
         code = "\n".join(code)
     visitor.run(textwrap.dedent(code))
     return visitor
@@ -66,32 +66,33 @@ def test_Definition() -> None:
 
 
 @pytest.mark.parametrize(
-    ("snippet", "expected_args"),
+    ("snippet", "expected_args", "n_defaults"),
     [
-        ("x", {"x"}),
-        ("x: int", {"x"}),
-        ("x, y", {"x", "y"}),
-        ("x: int, y: str", {"x", "y"}),
-        ("x, y=1", {"x", "y"}),
-        ("x, *y", {"x", "y"}),
-        ("x, **y", {"x", "y"}),
-        ("*x", {"x"}),
-        ("**x", {"x"}),
-        ("x, *, y", {"x", "y"}),
-        ("x, /", {"x"}),
-        ("x, y, /", {"x", "y"}),
-        ("x, y, /, z", {"x", "y", "z"}),
-        ("x, y, *, z", {"x", "y", "z"}),
-        ("x, y, /, z, *, w", {"x", "y", "z", "w"}),
+        ("x", {"x"}, 0),
+        ("x: int", {"x"}, 0),
+        ("x, y", {"x", "y"}, 0),
+        ("x: int, y: str", {"x", "y"}, 0),
+        ("x, y=1", {"x", "y"}, 1),
+        ("x, *y", {"x", "y"}, 0),
+        ("x, **y", {"x", "y"}, 0),
+        ("*x", {"x"}, 0),
+        ("**x", {"x"}, 0),
+        ("x, *, y", {"x", "y"}, 0),
+        ("x, /", {"x"}, 0),
+        ("x, y, /", {"x", "y"}, 0),
+        ("x, y, /, z", {"x", "y", "z"}, 0),
+        ("x, y, *, z", {"x", "y", "z"}, 0),
+        ("x, y, /, z, *, w", {"x", "y", "z", "w"}, 0),
     ],
 )
-def test_get_args(snippet: str, expected_args: set[str]) -> None:
+def test_get_args(snippet: str, expected_args: set[str], n_defaults: int) -> None:
     """Test get_args function."""
     code = f"def f({snippet}): pass"
     func_node: ast.FunctionDef = ast.parse(code).body[0]  # type: ignore[assignment]
-    args = get_args(func_node)
+    args, defaults = get_args(func_node)
     arg_names = {arg.arg for arg in args}
     assert arg_names == expected_args
+    assert len(defaults) == n_defaults  # TODO(tihoph): test also defaults
 
 
 def test_ScopeVisitor_init() -> None:
@@ -106,6 +107,68 @@ def test_ScopeVisitor_init() -> None:
     assert visitor.dep_graph == {}
     assert visitor._visited_nodes == []
     assert visitor.all is None
+
+
+def test_run_add_imports() -> None:
+    code = "import os\nimport sys as sys"
+    visitor = parse_and_visit(code)
+    assert visitor.dep_graph == {Definition("test_module", None): set()}
+
+    visitor = parse_and_visit(code, "test_module.__init__")
+    assert visitor.dep_graph == {
+        Definition("test_module.__init__", None): set(),
+        Definition("test_module.__init__", "sys"): {Import("sys")},
+    }
+
+    # for redefinitions add both
+    code = "import os\nif True: import sys as sys\nelse: import os as sys"
+    visitor = parse_and_visit(code, "test_module.__init__")
+    assert visitor.dep_graph == {
+        Definition("test_module.__init__", None): set(),
+        Definition("test_module.__init__", "sys"): {Import("sys"), Import("os", "sys")},
+    }
+
+
+def test_run_add_definitions() -> None:
+    visitor = parse_and_visit("import sys\nx = sys.path")
+    assert visitor.dep_graph == {
+        Definition("test_module", None): set(),
+        Definition("test_module", "x"): {Import("sys"), Import(("sys", "path"), None)},
+    }
+    visitor = parse_and_visit("import sys, os\nx = sys.path\nx = os.path")
+    assert visitor.dep_graph == {
+        Definition("test_module", None): set(),
+        Definition("test_module", "x"): {
+            Import("sys"),
+            Import("os"),
+            Import(("sys", "path"), None),
+            Import(("os", "path"), None),
+        },
+    }
+
+
+def test_run_overwrite_definitions() -> None:
+    visitor = parse_and_visit("import sys, os\ndef os(): sys.path")
+    assert visitor.dep_graph == {
+        Definition("test_module", None): set(),
+        Definition("test_module", "os"): {Import("sys"), Import(("sys", "path"), None)},
+    }
+
+    visitor = parse_and_visit("import sys, os\ndef other():\n  os = sys.path\n  print(os)")
+    assert visitor.dep_graph == {
+        Definition("test_module", None): set(),
+        Definition("test_module", "other"): {
+            Import("sys"),
+            Import("os"),
+            Import(("sys", "path"), None),
+        },
+    }
+
+    visitor = parse_and_visit("import sys, os\ndef other():\n  print(os)\ndef other(): print(sys)")
+    assert visitor.dep_graph == {
+        Definition("test_module", None): set(),
+        Definition("test_module", "other"): {Import("sys"), Import("os")},
+    }
 
 
 def test_visit_Global_fail() -> None:
@@ -147,21 +210,26 @@ def test_visit_Nonlocal() -> None:
 
 
 @pytest.mark.parametrize(
-    ("code", "expected_imports", "expected_imports_from"),
+    ("code", "expected_imports"),
     [
-        ("import os", {"os": "os"}, {}),
-        ("import os, sys", {"os": "os", "sys": "sys"}, {}),
-        ("import sys as system", {"system": "sys"}, {}),
-        ("import os, sys as system", {"os": "os", "system": "sys"}, {}),
+        ("import os", {"os": [("os", None)]}),
+        ("import os, sys", {"os": [("os", None)], "sys": [("sys", None)]}),
+        ("import sys as system", {"system": [("sys", "system")]}),
+        ("import os, sys as system", {"os": [("os", None)], "system": [("sys", "system")]}),
         (
             "from collections import defaultdict",
-            {},
-            {"defaultdict": ("collections", "defaultdict")},
+            {"defaultdict": [("collections", "defaultdict", None)]},
         ),
-        ("from pathlib import Path as P", {}, {"P": ("pathlib", "Path")}),
+        ("from pathlib import Path as P", {"P": [("pathlib", "Path", "P")]}),
         # Ensure tracker handles multiple imports added via visitor
-        ("import os\nimport logging", {"os": "os", "logging": "logging"}, {}),
-        ("from a import b\nfrom c import d as e", {}, {"b": ("a", "b"), "e": ("c", "d")}),
+        ("import os\nimport logging", {"os": [("os", None)], "logging": [("logging", None)]}),
+        (
+            "from a import b\nfrom c import d as e",
+            {"b": [("a", "b", None)], "e": [("c", "d", "e")]},
+        ),
+        # redefining imports
+        ("import os\nimport os", {"os": [("os", None), ("os", None)]}),
+        ("import os\nimport sys as os", {"os": [("os", None), ("sys", "os")]}),
     ],
     ids=[
         "simple_import",
@@ -172,17 +240,18 @@ def test_visit_Nonlocal() -> None:
         "from_import_as",
         "multi_import",
         "multi_from_import",
+        "redefining_import",
+        "redefining_import_as",
     ],
 )
 def test_visit_Import_ImportFrom(
-    code: str, expected_imports: dict[str, str], expected_imports_from: dict[str, tuple[str, str]]
+    code: str, expected_imports: dict[str, list[str | tuple[str, str]]]
 ) -> None:
     """Test that visiting imports updates the tracker correctly."""
     visitor = parse_and_visit(code)
     # Imports are added to the outermost scope
     outer_scope = visitor.tracker.scopes[0]
     assert outer_scope.imports == expected_imports
-    assert outer_scope.imports_from == expected_imports_from
 
     # check the same for nested
     nested_code_lines = ["def func():"] + [f"  {line}" for line in code.splitlines()]
@@ -191,11 +260,9 @@ def test_visit_Import_ImportFrom(
     # assert outer scope is empty
     nested_outer_scope = nested_visitor.tracker.scopes[0]
     assert nested_outer_scope.imports == {}
-    assert nested_outer_scope.imports_from == {}
     # assert inner scope is correct
     nested_inner_scope = nested_visitor.tracker.all_scopes[id(func_node)]
     assert nested_inner_scope.imports == expected_imports
-    assert nested_inner_scope.imports_from == expected_imports_from
 
 
 def test_ImportFrom_star() -> None:
@@ -209,7 +276,10 @@ def test_ImportFrom_relative() -> None:
 
     visitor = parse_and_visit("from . import foo\nfrom .other import bar", "pkg.test_module")
     outer_scope = visitor.tracker.scopes[0]
-    assert outer_scope.imports_from == {"foo": ("pkg", "foo"), "bar": ("pkg.other", "bar")}
+    assert outer_scope.imports == {
+        "foo": [("pkg", "foo", None)],
+        "bar": [("pkg.other", "bar", None)],
+    }
 
 
 @pytest.mark.parametrize(
@@ -248,8 +318,13 @@ def test_visit_Name_store_del(code: str, expected: set[str]) -> None:
         ("x.a.b", set(), {ModDef: set()}, ["x"]),
         ("x = 1\nx.a", {"x"}, {ModDef: {XDef}, XDef: set()}, []),
         ("x = 1\nx.a.b", {"x"}, {ModDef: {XDef}, XDef: set()}, []),
-        ("import os\nos.path", set(), {ModDef: {OsImp}}, []),
-        ("import os\nx = 1\nx\nos.path", {"x"}, {ModDef: {OsImp, XDef}, XDef: set()}, []),
+        ("import os\nos.path", set(), {ModDef: {OsImp, Import(("os", "path"), None)}}, []),
+        (
+            "import os\nx = 1\nx\nos.path",
+            {"x"},
+            {ModDef: {OsImp, XDef, Import(("os", "path"), None)}, XDef: set()},
+            [],
+        ),
         ("import importlib.util\nimportlib.spec", set(), {ModDef: set()}, []),
     ],
     ids=[
@@ -296,7 +371,11 @@ def test_visit_Name_Attribute_load(
     assert set(nested_inner_scope.names) == expected
 
     # if the import is kept
-    func_deps = {OsImp} if any(OsImp in v for v in dep_graph.values()) else set()
+    func_deps = (
+        {OsImp, Import(("os", "path"), None)}
+        if any(OsImp in v for v in dep_graph.values())
+        else set()
+    )
     assert nested_visitor.dep_graph == {ModDef: set(), FuncDef: func_deps}
 
 
@@ -325,6 +404,37 @@ def test_visit_Name_nonlocal() -> None:
     assert set(func_scope.names) == {"x"}
     assert set(func_scope.functions) == {"inner"}
     assert visitor.dep_graph == {ModDef: set(), FuncDef: set()}
+
+
+@pytest.mark.parametrize("code", ["""__all__ = ["x"]""", """__all__: list[str] = ["x"]"""])
+def test_handle_all(code: str) -> None:
+    visitor = parse_and_visit(f"x=3\n{code}")
+    assert visitor.all == ["x"]
+    assert visitor.dep_graph == {ModDef: set(), AllDef: set(), XDef: set()}
+
+    visitor = parse_and_visit(f"import x\n{code}")
+    assert visitor.all == ["x"]
+    assert visitor.dep_graph == {ModDef: set(), AllDef: set(), XDef: {Import("x")}}
+
+    with pytest.raises(ValueError, match="Name in __all__ neither defined nor an import"):
+        parse_and_visit(code)
+
+
+def test_handle_all_errors() -> None:
+    with pytest.raises(TypeError, match=r"Expected a tuple or list of literal strings, got"):
+        parse_and_visit("__all__ = [1, 2, 3]")
+
+    with pytest.raises(ValueError, match="No value for __all__ assignment."):
+        parse_and_visit("__all__: list[str]")
+
+    with pytest.raises(ValueError, match="Unsupported __all__ definition."):
+        parse_and_visit("__all__ += []")
+
+    with pytest.raises(ValueError, match="Unsupported __all__ definition."):
+        parse_and_visit("__all__, other = []")
+
+    with pytest.raises(ValueError, match="__all__ must be defined at the module level."):
+        parse_and_visit("def func():\n  __all__ = []")
 
 
 def test_AugAssign() -> None:

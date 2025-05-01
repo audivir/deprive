@@ -201,9 +201,18 @@ def test_handle_elem(code: str, keep: set[str]) -> None:
 
 
 @pytest.mark.parametrize(
-    "code", ["""__all__ = ["a", "b", "c"]""", """__all__: list[str] = ["a", "b", "c"]"""]
+    "code",
+    [
+        """__all__ = ("a", "b", "c")""",
+        """__all__ = ["a", "b", "c"]""",
+        """__all__: list[str] = ["a", "b", "c"]""",
+    ],
 )
 def test_handle_elem_all(code: str) -> None:
+    parens = "()" if "(" in code else "[]"
+    p_open, p_close = parens[0], parens[1]
+    comma = "," if "(" in code else ""
+
     intro, _ = code.split(" = ", 1)
     node: cst.SimpleStatementLine = cst.parse_statement(code)  # type: ignore[assignment]
     elem: cst.Assign | cst.AnnAssign = node.body[0]  # type: ignore[assignment]
@@ -211,15 +220,15 @@ def test_handle_elem_all(code: str) -> None:
 
     new_node = handle_elem(node, elem, set(), {"a"})
     assert len(new_node) == 1
-    assert_node_equals(new_node[0], f"{intro} = ['a']")
+    assert_node_equals(new_node[0], f"{intro} = {p_open}'a'{comma}{p_close}")
 
     new_node = handle_elem(node, elem, {"b"}, {"a"})
     assert len(new_node) == 1
-    assert_node_equals(new_node[0], f"{intro} = ['a', 'b']")
+    assert_node_equals(new_node[0], f"{intro} = {p_open}'a', 'b'{p_close}")
 
     new_node = handle_elem(node, elem, {"c"}, set())
     assert len(new_node) == 1
-    assert_node_equals(new_node[0], f"{intro} = ['c']")
+    assert_node_equals(new_node[0], f"{intro} = {p_open}'c'{comma}{p_close}")
 
     assert handle_elem(node, elem, {"c"}, {"a", "b"}) == [node]
 
@@ -227,7 +236,7 @@ def test_handle_elem_all(code: str) -> None:
 def test_handle_elem_all_not_list_of_strings() -> None:
     node: cst.SimpleStatementLine = cst.parse_statement("__all__ = [1, 2, 3]")  # type: ignore[assignment]
     assign_node: cst.Assign = node.body[0]  # type: ignore[assignment]
-    with pytest.raises(TypeError, match=r"Expected a list of literal strings, got"):
+    with pytest.raises(TypeError, match=r"Expected a tuple or list of literal strings, got"):
         handle_elem(node, assign_node, set(), set())
 
 

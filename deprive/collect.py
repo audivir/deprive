@@ -39,7 +39,7 @@ def collect_module(file_path: StrPath, root_dir: StrPath | None = None) -> DepGr
         root_dir = Path(root_dir)
 
     fqn = path_to_fqn(file_path, root_dir)
-    visitor = ScopeVisitor(fqn)
+    visitor = ScopeVisitor(fqn, file_path.name == "__init__.py")
     visitor.run(file_path.read_text())
     return visitor.dep_graph
 

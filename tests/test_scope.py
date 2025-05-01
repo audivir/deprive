@@ -33,28 +33,29 @@ def test_Scope_init() -> None:
     """Test Scope initialization."""
     scope = Scope()
     assert scope.imports == {}
-    assert scope.imports_from == {}
     assert scope.functions == {}
     assert scope.names == {}
     assert scope.global_names == set()
     assert scope.nonlocal_names == set()
-    assert scope.fields == ({}, {}, {}, {})
+    assert scope.fields == ({}, {}, {})
     func_node = _make_func()
     scope = Scope(
-        imports={"a": "b"},
-        imports_from={"c": ("d", "e")},
+        imports={"a": [("b", "a")], "c": [("d", "e", "c")]},
         functions={"f": func_node},
         names={"h": None},
         global_names={"j"},
         nonlocal_names={"k"},
     )
-    assert scope.imports == {"a": "b"}
-    assert scope.imports_from == {"c": ("d", "e")}
+    assert scope.imports == {"a": [("b", "a")], "c": [("d", "e", "c")]}
     assert scope.functions == {"f": func_node}
     assert scope.names == {"h": None}
     assert scope.global_names == {"j"}
     assert scope.nonlocal_names == {"k"}
-    assert scope.fields == ({"a": "b"}, {"c": ("d", "e")}, {"f": func_node}, {"h": None})
+    assert scope.fields == (
+        {"a": [("b", "a")], "c": [("d", "e", "c")]},
+        {"f": func_node},
+        {"h": None},
+    )
 
 
 def test_ScopeTracker_init() -> None:
@@ -74,8 +75,8 @@ def test_ScopeTracker_init() -> None:
         ([], "x", None),
         # Test name in outermost scope only
         ([{"names": {"x": _make_name()}}], "x", "outermost"),
-        ([{"imports": {"y": "mod_y"}}], "y", "outermost"),
-        ([{"imports_from": {"z": ("mod_z", "z_orig")}}], "z", "outermost"),
+        ([{"imports": {"y": [("mod_y", "y")]}}], "y", "outermost"),
+        ([{"imports": {"z": [("mod_z", "z_orig", "z")]}}], "z", "outermost"),
         ([{"functions": {"f": _make_func("f")}}], "f", "outermost"),
         # Test name not present
         ([{"names": {"x": _make_name()}}], "y", None),
@@ -88,7 +89,7 @@ def test_ScopeTracker_init() -> None:
         # Test complex nesting
         (
             [
-                {"imports": {"a": "mod_a"}},
+                {"imports": {"a": [("mod_a", "a")]}},
                 {"names": {"b": _make_name("b")}},
                 {"functions": {"a": _make_func("a")}},
             ],
@@ -160,7 +161,6 @@ def test_is_in(
     for scope_data in setup_scopes:
         scope = Scope(
             imports=scope_data.get("imports", {}),
-            imports_from=scope_data.get("imports_from", {}),
             functions=scope_data.get("functions", {}),
             names=scope_data.get("names", {}),
         )
@@ -185,34 +185,46 @@ def test_is_in(
     ("setup_scopes", "name_to_check", "expected"),
     [
         ([], "x", None),  # Empty scope
-        ([{"imports": {"x": "mod_x"}}], "x", "mod_x"),  # Direct import
-        ([{"imports_from": {"y": ("mod_y", "y_orig")}}], "y", ("mod_y", "y_orig")),  # From import
+        ([{"imports": {"x": [("mod_x", "x")]}}], "x", [("mod_x", "x")]),  # Direct import
+        (
+            [{"imports": {"y": [("mod_y", "y_orig", "y")]}}],
+            "y",
+            [("mod_y", "y_orig", "y")],
+        ),  # From import
         ([{"names": {"z": _make_name("z")}}], "z", None),  # Regular name
         ([{"functions": {"f": _make_func("f")}}], "f", None),  # Function name
         # Check across scopes
         (
-            [{"imports": {"x": "mod_x"}}, {"names": {"y": _make_name("y")}}],
+            [{"imports": {"x": [("mod_x", "x")]}}, {"names": {"y": _make_name("y")}}],
             "x",
-            "mod_x",
+            [("mod_x", "x")],
         ),  # Import in outer
         (
-            [{"names": {"x": _make_name()}}, {"imports": {"y": "mod_y"}}],
+            [{"names": {"x": _make_name()}}, {"imports": {"y": [("mod_y", "y")]}}],
             "y",
-            "mod_y",
+            [("mod_y", "y")],
         ),  # Import in inner
         (
-            [{"imports_from": {"x": ("mod_x", "x_orig")}}, {"names": {"y": _make_name("y")}}],
+            [{"imports": {"x": [("mod_x", "x_orig", "x")]}}, {"names": {"y": _make_name("y")}}],
             "x",
-            ("mod_x", "x_orig"),
+            [("mod_x", "x_orig", "x")],
         ),  # ImportFrom in outer
         (
-            [{"names": {"x": _make_name()}}, {"imports_from": {"y": ("mod_y", "y_orig")}}],
+            [{"names": {"x": _make_name()}}, {"imports": {"y": [("mod_y", "y_orig", "y")]}}],
             "y",
-            ("mod_y", "y_orig"),
+            [("mod_y", "y_orig", "y")],
         ),  # ImportFrom in inner
         # Shadowing (is_import checks if *any* scope defines it as import)
-        ([{"imports": {"x": "mod_x"}}, {"names": {"x": _make_name()}}], "x", "mod_x"),
-        ([{"names": {"x": _make_name()}}, {"imports": {"x": "mod_x"}}], "x", "mod_x"),
+        (
+            [{"imports": {"x": [("mod_x", "x")]}}, {"names": {"x": _make_name()}}],
+            "x",
+            [("mod_x", "x")],
+        ),
+        (
+            [{"names": {"x": _make_name()}}, {"imports": {"x": [("mod_x", "x")]}}],
+            "x",
+            [("mod_x", "x")],
+        ),
     ],
     ids=[
         "empty",
@@ -229,7 +241,9 @@ def test_is_in(
     ],
 )
 def test_is_import(
-    setup_scopes: list[dict[str, Any]], name_to_check: str, expected: str | None
+    setup_scopes: list[dict[str, Any]],
+    name_to_check: str,
+    expected: list[tuple[str, str | None] | tuple[str, str, str | None]] | None,
 ) -> None:
     """Test ScopeTracker.is_import method."""
     tracker = ScopeTracker()
@@ -237,7 +251,6 @@ def test_is_import(
     for scope_data in setup_scopes:
         scope = Scope(
             imports=scope_data.get("imports", {}),
-            imports_from=scope_data.get("imports_from", {}),
             functions=scope_data.get("functions", {}),
             names=scope_data.get("names", {}),
         )
@@ -247,6 +260,8 @@ def test_is_import(
         tracker.scopes.append(Scope())
 
     assert tracker.is_import(name_to_check) == expected
+    outer_expected = expected if setup_scopes and "imports" in setup_scopes[0] else None
+    assert tracker.is_import(name_to_check, outer_only=True) == outer_expected
 
 
 @pytest.mark.parametrize(
@@ -461,68 +476,42 @@ def test_add_func() -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "node", "initial_imports", "expected_names", "expected_exception"),
+    ("name", "node", "initial_imports", "expected_names"),
     [
-        ("x", _make_assign(), {}, {"x": Ellipsis}, None),  # Single name
-        (("y", "z"), _make_assign(), {}, {"y": Ellipsis, "z": Ellipsis}, None),  # Tuple of names
-        (
-            "a",
-            _make_assign(annotated=True),
-            {},
-            {"a": Ellipsis},
-            None,
-        ),  # Single name, different node
-        (None, _make_assign(), {}, {}, None),  # None name, should do nothing
-        (
-            "os",
-            _make_assign(),
-            {"imports": {"os": "os"}},
-            {},
-            NotImplementedError,
-        ),  # Name conflicts with import
-        (
-            "m_path",
-            _make_assign(),
-            {"imports_from": {"m_path": ("os", "path")}},
-            {},
-            NotImplementedError,
-        ),  # Name conflicts with import from
+        ("x", _make_assign(), {}, {"x": Ellipsis}),  # Single name
+        (("y", "z"), _make_assign(), {}, {"y": Ellipsis, "z": Ellipsis}),  # Tuple of names
+        ("a", _make_assign(annotated=True), {}, {"a": Ellipsis}),  # Single name, different node
+        (None, _make_assign(), {}, {}),  # None name, should do nothing
+        ("os", _make_assign(), {"os": [("os", None)]}, {"os"}),
+        ("m_path", _make_assign(), {"m_path": [("os", "path", None)]}, {"m_path"}),
     ],
     ids=[
         "single_name",
         "tuple_name",
         "different_node",
         "none_name",
-        "conflict_import",
-        "conflict_import_from",
+        "overwrite_import",
+        "overwrite_import_from",
     ],
 )
 def test_add_name(
     name: str | tuple[str, ...] | None,
     node: ast.AST,
-    initial_imports: dict[str, dict[str, Any]],
+    initial_imports: dict[str, list[tuple[str, str | None] | tuple[str, str, str | None]]],
     expected_names: dict[str, ast.AST],
-    expected_exception: type[Exception] | None,
 ) -> None:
     """Test adding names to the current scope."""
     tracker = ScopeTracker()
     # Set up initial imports if needed for conflict testing
-    if "imports" in initial_imports:
-        tracker.scopes[0].imports = initial_imports["imports"]
-    if "imports_from" in initial_imports:
-        tracker.scopes[0].imports_from = initial_imports["imports_from"]
+    tracker.scopes[0].imports = initial_imports
 
-    if expected_exception:
-        with pytest.raises(expected_exception, match="Redefining imports is not supported yet"):
-            tracker.add_name(name, node)
-    else:
-        tracker.add_name(name, node)
-        current_scope = tracker.current_scope
-        # Use Ellipsis to check for presence and avoid exact node comparison if not needed
-        assert len(current_scope.names) == len(expected_names)
-        for n in expected_names:
-            assert n in current_scope.names
-            # Can optionally add assert current_scope.names[n] is node if needed
+    tracker.add_name(name, node)
+    current_scope = tracker.current_scope
+    # Use Ellipsis to check for presence and avoid exact node comparison if not needed
+    assert len(current_scope.names) == len(expected_names)
+    for n in expected_names:
+        assert n in current_scope.names
+        # Can optionally add assert current_scope.names[n] is node if needed
 
 
 def test_resolve_func() -> None:
@@ -586,11 +575,10 @@ def test_add_import() -> None:
     # Test ast.Import
     node_import: ast.Import = ast.parse("import os as myos").body[0]  # type: ignore[assignment]
     tracker.add_import(node_import.names[0], None)
-    assert tracker.current_scope.imports == {"myos": "os"}
-    assert tracker.current_scope.imports_from == {}
+    assert tracker.current_scope.imports == {"myos": [("os", "myos")]}
 
-    with pytest.raises(NotImplementedError, match="Redefining imports.*not supported"):
-        tracker.add_import(node_import.names[0], None)
+    tracker.add_import(node_import.names[0], None)
+    assert tracker.current_scope.imports == {"myos": [("os", "myos"), ("os", "myos")]}
 
     # Reset scope imports for next test
     tracker = ScopeTracker()
@@ -598,11 +586,10 @@ def test_add_import() -> None:
     # Test ast.ImportFrom
     node_import_from: ast.ImportFrom = ast.parse("from sys import argv as a").body[0]  # type: ignore[assignment]
     tracker.add_import(node_import_from.names[0], node_import_from.module)
-    assert tracker.current_scope.imports == {}
-    assert tracker.current_scope.imports_from == {"a": ("sys", "argv")}
+    assert tracker.current_scope.imports == {"a": [("sys", "argv", "a")]}
 
-    with pytest.raises(NotImplementedError, match="Redefining imports.*not supported"):
-        tracker.add_import(node_import_from.names[0], None)
+    tracker.add_import(node_import_from.names[0], None)
+    assert tracker.current_scope.imports == {"a": [("sys", "argv", "a"), ("argv", "a")]}
 
 
 def test_add_global() -> None:

@@ -34,11 +34,7 @@ def path_to_fqn(path: Path, root_dir: Path | None) -> str:
     if not parts:  # pragma: no cover # Should not happen if path is relative to root_dir
         raise ValueError("Empty path parts for %s relative to %s", path, root_dir)
 
-    if parts[-1] == "__init__.py":
-        parts.pop()  # Module name is the directory name
-        if not parts:  # Root __init__.py
-            return root_dir.name
-    elif parts[-1].endswith(".py"):
+    if parts[-1].endswith(".py"):
         parts[-1] = parts[-1][:-3]  # Replace .py extension with module name
     else:
         logger.warning("Path %s does not end with .py or __init__.py", path)
